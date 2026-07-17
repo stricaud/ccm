@@ -16,12 +16,30 @@ endif()
 
 project(ccm C)
 
+# Version stamped into `ccm --version`. Resolution order:
+#   1. $CCM_VERSION  — the release workflow passes the git tag here (and
+#      packaging/wheel.py uses the same value for the wheel), so a CI build
+#      whose checkout is too shallow for `git describe` is still labelled right.
+#   2. `git describe --tags` — a local build from a tagged checkout is labelled
+#      correctly with no extra effort.
+#   3. 0.0.0 — untagged, or no git available.
 set(CCM_VERSION "0.0.0")
-# Let CI stamp the real version: the release workflow passes the git tag as
-# $CCM_VERSION (used by packaging/wheel.py too). Cosmetic — `ccm --version`.
 if(DEFINED ENV{CCM_VERSION} AND NOT "$ENV{CCM_VERSION}" STREQUAL "")
   set(CCM_VERSION "$ENV{CCM_VERSION}")
+else()
+  find_package(Git QUIET)
+  if(GIT_FOUND)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" describe --tags --always --dirty
+      OUTPUT_VARIABLE _git_desc OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_git_desc)
+      set(CCM_VERSION "${_git_desc}")
+    endif()
+  endif()
 endif()
+# Normalise a leading "v" (v0.0.2 -> 0.0.2) so `ccm --version` matches the pip
+# version reported by `pip show cacamacs`.
+string(REGEX REPLACE "^v" "" CCM_VERSION "${CCM_VERSION}")
 
 if(${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR})
   message(FATAL_ERROR "In-source builds are not allowed. Build from a subdir:

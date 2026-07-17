@@ -21,6 +21,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write          # needed to attach assets to the release
+    # The tag being built (e.g. v0.0.3), empty for a workflow_dispatch run. Set
+    # once here so every step inherits it: the C build bakes it into
+    # `ccm --version` (see CMakeLists), and packaging/wheel.py names the wheel
+    # with it — the shallow CI checkout has no tags for `git describe` to find.
+    env:
+      CCM_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -92,11 +98,6 @@ jobs:
       - name: Build & bundle (Windows)
         if: runner.os == 'Windows'
         working-directory: ccm
-        env:
-          # The checkout is shallow, so `git describe` finds no tag to name the
-          # wheel with — hand it the tag we were built from (empty for a
-          # workflow_dispatch run, which then versions the wheel 0.0.0).
-          CCM_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
           export GTCACA_SRC="$(cd ../gtcaca && pwd)"
           bash packaging/build.sh
@@ -138,8 +139,6 @@ jobs:
         working-directory: ccm
         shell: bash
         timeout-minutes: 10
-        env:
-          CCM_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
           # Pick an interpreter that actually runs: on Windows a bare `python3`
           # can resolve to the Store app-execution stub, which is on PATH but is

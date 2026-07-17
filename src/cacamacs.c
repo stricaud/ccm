@@ -32,8 +32,10 @@
  *   View   : C-x l line numbers   C-x f folding mode   C-x t toggle fold
  *            C-x a toggle annotation on the current line
  *   Files  : C-x d open the file browser (navigate the current directory)
- *   JSON   : .json/.jsonl open in JSON mode (colour + fold); C-x p pretty-prints
- *            the selection / whole buffer / current JSONL line.
+ *   JSON   : .json/.jsonl open in JSON mode (colour + fold).
+ *   Pretty : C-x p pretty-prints JSON or XML (auto-detected) — the selection,
+ *            else the whole buffer if it is one document, else the current line.
+ *            M-x json-pretty-print / xml-pretty-print force a format on the line.
  */
 
 #include "cacamacs.h"

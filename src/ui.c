@@ -133,7 +133,8 @@ const char *help_text(void)
   "         C-x d directory browser\n"
   "View     C-x l line numbers   C-x f folding   C-x t toggle fold   C-x a annotate\n"
   "         C-x C-l line wrap (on by default)   C-x w whitespace   C-l recenter\n"
-  "JSON     C-x p pretty-print (.json/.jsonl open in JSON mode)\n"
+  "Pretty   C-x p pretty-print JSON/XML (auto: selection / buffer / line)\n"
+  "         M-x json-pretty-print · xml-pretty-print (current line)\n"
   "Undo     C-/   (also C-x u)        Help   M-x help\n";
 }
 

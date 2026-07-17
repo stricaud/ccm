@@ -327,13 +327,30 @@ void toggle_annotation_here(gtcaca_editor_widget_t *ed)
   }
 }
 
-/* Pretty-print JSON: the selection, else the whole buffer if it is one JSON
-   value, else the current line (handy for a JSONL record). */
-void pretty_print_json(gtcaca_editor_widget_t *ed)
+static int xml_prettify(const char *src, char **out);   /* defined below */
+
+/* Is the whole text a single JSON value or a well-formed XML document? Used to
+   decide whether C-x p treats the buffer as one document (vs the current line). */
+static int whole_is_doc(const char *all)
+{
+  gtcaca_json_value *j = gtcaca_json_parse(all);
+  if (j) { gtcaca_json_free(j); return 1; }
+  { char *x = NULL; if (xml_prettify(all, &x)) { free(x); return 1; } }
+  return 0;
+}
+
+/* C-x p: pretty-print JSON *or* XML, auto-detecting which. Operates on the
+   selection, else the whole buffer when it is a single JSON value or a
+   well-formed XML document, else the current line (handy for a JSONL/one-line
+   record). Errors (no edit) if the target is neither JSON nor XML. */
+void pretty_print_auto(gtcaca_editor_widget_t *ed)
 {
   int a, b, n;
-  char *src, *pretty;
+  char *src, *pretty = NULL;
+  const char *kind = NULL;
   gtcaca_json_value *v;
+
+  if (!ed) { snprintf(g_message, sizeof g_message, "No buffer"); return; }
 
   if (gtcaca_editor_get_selection_start(ed) != gtcaca_editor_get_selection_end(ed)) {
     a = gtcaca_editor_get_selection_start(ed);
@@ -341,9 +358,9 @@ void pretty_print_json(gtcaca_editor_widget_t *ed)
   } else {
     int len = gtcaca_editor_get_length(ed);
     char *all = malloc((size_t)len + 1);
-    gtcaca_json_value *whole = NULL;
-    if (all) { gtcaca_editor_get_text(ed, all, len + 1); whole = gtcaca_json_parse(all); free(all); }
-    if (whole) { a = 0; b = len; gtcaca_json_free(whole); }
+    int whole = 0;
+    if (all) { gtcaca_editor_get_text(ed, all, len + 1); whole = whole_is_doc(all); free(all); }
+    if (whole) { a = 0; b = len; }
     else {
       int line = gtcaca_editor_get_current_line(ed);
       a = gtcaca_editor_position_from_line(ed, line);
@@ -352,12 +369,51 @@ void pretty_print_json(gtcaca_editor_widget_t *ed)
   }
 
   n = b - a;
+  if (n <= 0) { snprintf(g_message, sizeof g_message, "Nothing to pretty-print"); return; }
+  src = malloc((size_t)n + 1);
+  if (!src) return;
+  gtcaca_editor_get_text_range(ed, a, b, src, n + 1);
+
+  /* JSON first (its parser is stricter, so it won't misread markup), then XML. */
+  v = gtcaca_json_parse(src);
+  if (v) { pretty = gtcaca_json_stringify(v, 2); gtcaca_json_free(v); if (pretty) kind = "JSON"; }
+  if (!kind && xml_prettify(src, &pretty)) kind = "XML";
+  free(src);
+
+  if (!kind) { free(pretty); snprintf(g_message, sizeof g_message, "Not valid JSON or XML"); return; }
+
+  gtcaca_editor_delete_range(ed, a, b - a);
+  gtcaca_editor_insert_text(ed, a, pretty);
+  gtcaca_editor_set_empty_selection(ed, a + (int)strlen(pretty));
+  free(pretty);
+
+  if (gtcaca_editor_get_json_mode(ed)) gtcaca_editor_fold_json(ed);
+  snprintf(g_message, sizeof g_message, "Pretty-printed %s", kind);
+}
+
+/* M-x json-pretty-print: pretty-print the JSON value on the *current line* in
+   place, expanding it across lines. Unlike C-x p (pretty_print_json) this always
+   targets the current line — never the selection or whole buffer — and reports
+   an error, making no edit, when that line is not valid JSON. */
+void pretty_print_json_line(gtcaca_editor_widget_t *ed)
+{
+  int line, a, b, n;
+  char *src, *pretty;
+  gtcaca_json_value *v;
+
+  if (!ed) { snprintf(g_message, sizeof g_message, "No buffer"); return; }
+  line = gtcaca_editor_get_current_line(ed);
+  a = gtcaca_editor_position_from_line(ed, line);
+  b = gtcaca_editor_get_line_end_position(ed, line);
+  n = b - a;
+  if (n <= 0) { snprintf(g_message, sizeof g_message, "Current line is empty — not valid JSON"); return; }
+
   src = malloc((size_t)n + 1);
   if (!src) return;
   gtcaca_editor_get_text_range(ed, a, b, src, n + 1);
   v = gtcaca_json_parse(src);
   free(src);
-  if (!v) { snprintf(g_message, sizeof g_message, "Not valid JSON"); return; }
+  if (!v) { snprintf(g_message, sizeof g_message, "Current line is not valid JSON"); return; }
 
   pretty = gtcaca_json_stringify(v, 2);
   gtcaca_json_free(v);
@@ -369,7 +425,172 @@ void pretty_print_json(gtcaca_editor_widget_t *ed)
   free(pretty);
 
   if (gtcaca_editor_get_json_mode(ed)) gtcaca_editor_fold_json(ed);
-  snprintf(g_message, sizeof g_message, "Pretty-printed JSON");
+  snprintf(g_message, sizeof g_message, "Pretty-printed JSON line");
+}
+
+/* ── minimal XML pretty-printer (M-x xml-pretty-print) ───────────────────────
+   No external XML library, so the dependency set — and the pip bundle — stays
+   at libcaca + oniguruma. Tokenises a one-line XML fragment, verifies it is
+   well-formed (tags balanced and correctly nested), and re-emits it indented.
+   An element whose only child is text is kept on one line (<a>x</a>). Returns a
+   malloc'd string via *out on success, or 0 (no output) when the input is not
+   well-formed XML. */
+
+typedef struct { char *p; size_t len, cap; } sbuf;
+static int sb_put(sbuf *b, const char *s, size_t n) {
+  if (b->len + n + 1 > b->cap) {
+    size_t nc = b->cap ? b->cap : 256;
+    char *np;
+    while (nc < b->len + n + 1) nc *= 2;
+    np = realloc(b->p, nc); if (!np) return 0;
+    b->p = np; b->cap = nc;
+  }
+  memcpy(b->p + b->len, s, n); b->len += n; b->p[b->len] = '\0';
+  return 1;
+}
+static int sb_puts(sbuf *b, const char *s) { return sb_put(b, s, strlen(s)); }
+
+enum { X_OPEN, X_CLOSE, X_SELF, X_TEXT, X_MISC };  /* MISC: comment/PI/CDATA/decl */
+typedef struct { int type; const char *s; int len; char name[64]; } xtok;
+
+/* read an element name (after '<' or '</') into `out` */
+static void xml_name(const char *p, const char *end, char *out, int outsz) {
+  int i = 0;
+  while (p < end && (isalnum((unsigned char)*p) || *p=='_' || *p=='-' || *p==':' || *p=='.'))
+    { if (i < outsz-1) out[i++] = *p; p++; }
+  out[i] = '\0';
+}
+
+/* end of a normal tag: the char just past '>', honouring quoted attributes
+   (a '>' inside "…"/'…' does not close the tag). NULL if unterminated. */
+static const char *xml_tag_end(const char *p, const char *end) {
+  char q = 0;
+  p++;                                   /* skip '<' */
+  for (; p < end; p++) {
+    if (q)                    { if (*p == q) q = 0; }
+    else if (*p=='"'||*p=='\'') q = *p;
+    else if (*p == '>')        return p + 1;
+  }
+  return NULL;
+}
+
+static int xml_prettify(const char *src, char **out) {
+  const char *p = src, *end = src + strlen(src);
+  xtok *tk = NULL; int ntk = 0, cap = 0, i, depth = 0, ok = 1, saw_markup = 0;
+  char *stack[256]; int sp = 0;               /* open-tag names, for nesting */
+  sbuf b = {0,0,0};
+
+  #define PUSHTOK(T,S,L) do { \
+      if (ntk == cap) { int nc = cap ? cap*2 : 32; xtok *nt = realloc(tk, (size_t)nc*sizeof*tk); \
+        if (!nt) { ok = 0; goto done; } tk = nt; cap = nc; } \
+      tk[ntk].type=(T); tk[ntk].s=(S); tk[ntk].len=(L); tk[ntk].name[0]='\0'; ntk++; } while (0)
+
+  while (p < end && ok) {
+    if (*p == '<') {
+      const char *te;
+      if (!strncmp(p, "<!--", 4)) {
+        te = strstr(p, "-->"); if (!te) { ok = 0; break; } te += 3;
+        PUSHTOK(X_MISC, p, (int)(te-p)); saw_markup = 1; p = te;
+      } else if (!strncmp(p, "<![CDATA[", 9)) {
+        te = strstr(p, "]]>"); if (!te) { ok = 0; break; } te += 3;
+        PUSHTOK(X_MISC, p, (int)(te-p)); saw_markup = 1; p = te;
+      } else if (!strncmp(p, "<?", 2)) {
+        te = strstr(p, "?>"); if (!te) { ok = 0; break; } te += 2;
+        PUSHTOK(X_MISC, p, (int)(te-p)); saw_markup = 1; p = te;
+      } else if (!strncmp(p, "<!", 2)) {
+        te = xml_tag_end(p, end); if (!te) { ok = 0; break; }
+        PUSHTOK(X_MISC, p, (int)(te-p)); saw_markup = 1; p = te;
+      } else if (!strncmp(p, "</", 2)) {
+        te = xml_tag_end(p, end); if (!te) { ok = 0; break; }
+        PUSHTOK(X_CLOSE, p, (int)(te-p)); xml_name(p+2, te, tk[ntk-1].name, 64);
+        /* must match the innermost open tag */
+        if (sp == 0 || strcmp(stack[sp-1], tk[ntk-1].name) != 0) { ok = 0; break; }
+        sp--; p = te;
+      } else {
+        const char *q;
+        te = xml_tag_end(p, end); if (!te) { ok = 0; break; }
+        q = te - 2; while (q > p && isspace((unsigned char)*q)) q--;
+        if (*q == '/') { PUSHTOK(X_SELF, p, (int)(te-p)); xml_name(p+1, te, tk[ntk-1].name, 64); }
+        else {
+          PUSHTOK(X_OPEN, p, (int)(te-p)); xml_name(p+1, te, tk[ntk-1].name, 64);
+          if (sp >= 256) { ok = 0; break; }
+          stack[sp++] = tk[ntk-1].name;
+        }
+        saw_markup = 1; p = te;
+      }
+    } else {
+      const char *t = p, *e;
+      while (p < end && *p != '<') p++;
+      /* trim surrounding whitespace; drop whitespace-only inter-tag text */
+      while (t < p && isspace((unsigned char)*t)) t++;
+      e = p; while (e > t && isspace((unsigned char)e[-1])) e--;
+      if (e > t) PUSHTOK(X_TEXT, t, (int)(e-t));
+    }
+  }
+  /* well-formed ⇒ scanned cleanly, every tag closed, and at least one markup
+     token (a line of plain text is not XML). */
+  if (!ok || sp != 0 || !saw_markup) { ok = 0; goto done; }
+
+  for (i = 0; i < ntk; i++) {
+    int d;
+    if (tk[i].type == X_CLOSE) depth--;
+    for (d = 0; d < depth; d++) sb_puts(&b, "  ");
+    if (tk[i].type == X_OPEN) {
+      /* keep <a></a> and <a>text</a> on one line */
+      if (i+1 < ntk && tk[i+1].type == X_CLOSE && !strcmp(tk[i+1].name, tk[i].name)) {
+        sb_put(&b, tk[i].s, (size_t)tk[i].len); sb_put(&b, tk[i+1].s, (size_t)tk[i+1].len); i++;
+      } else if (i+2 < ntk && tk[i+1].type == X_TEXT
+                 && tk[i+2].type == X_CLOSE && !strcmp(tk[i+2].name, tk[i].name)) {
+        sb_put(&b, tk[i].s, (size_t)tk[i].len); sb_put(&b, tk[i+1].s, (size_t)tk[i+1].len);
+        sb_put(&b, tk[i+2].s, (size_t)tk[i+2].len); i += 2;
+      } else {
+        sb_put(&b, tk[i].s, (size_t)tk[i].len); depth++;
+      }
+    } else {
+      sb_put(&b, tk[i].s, (size_t)tk[i].len);
+    }
+    if (i+1 < ntk) sb_puts(&b, "\n");
+  }
+
+done:
+  free(tk);
+  if (ok && b.p) { *out = b.p; return 1; }
+  free(b.p);
+  return 0;
+  #undef PUSHTOK
+}
+
+/* M-x xml-pretty-print: pretty-print the XML on the current line in place.
+   Like json-pretty-print, but for XML — errors, making no edit, when the line
+   is not well-formed XML. */
+void pretty_print_xml_line(gtcaca_editor_widget_t *ed)
+{
+  int line, a, b, n;
+  char *src, *pretty = NULL;
+
+  if (!ed) { snprintf(g_message, sizeof g_message, "No buffer"); return; }
+  line = gtcaca_editor_get_current_line(ed);
+  a = gtcaca_editor_position_from_line(ed, line);
+  b = gtcaca_editor_get_line_end_position(ed, line);
+  n = b - a;
+  if (n <= 0) { snprintf(g_message, sizeof g_message, "Current line is empty — not valid XML"); return; }
+
+  src = malloc((size_t)n + 1);
+  if (!src) return;
+  gtcaca_editor_get_text_range(ed, a, b, src, n + 1);
+  if (!xml_prettify(src, &pretty)) {
+    free(src);
+    snprintf(g_message, sizeof g_message, "Current line is not valid XML");
+    return;
+  }
+  free(src);
+
+  gtcaca_editor_delete_range(ed, a, b - a);
+  gtcaca_editor_insert_text(ed, a, pretty);
+  gtcaca_editor_set_empty_selection(ed, a + (int)strlen(pretty));
+  free(pretty);
+
+  snprintf(g_message, sizeof g_message, "Pretty-printed XML line");
 }
 
 void save_file(gtcaca_editor_widget_t *ed)

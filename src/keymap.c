@@ -152,7 +152,7 @@ int on_key(gtcaca_editor_widget_t *ed, int key, void *ud)
     case 't':               toggle_fold_here(ed);         return 1;  /* C-x t */
     case 'a':               toggle_annotation_here(ed);   return 1;  /* C-x a */
     case 'd':               show_browser();               return 1;  /* C-x d (dired) */
-    case 'p':               pretty_print_json(ed);        return 1;  /* C-x p */
+    case 'p':               pretty_print_auto(ed);        return 1;  /* C-x p (JSON/XML) */
     case 'r':               g_rect_prefix = 1;                        /* C-x r … rectangle */
                             snprintf(g_message, sizeof g_message, "C-x r-"); return 1;
     case ' ':               set_rectangle_mark(ed);       return 1;  /* C-x SPC rect mark */

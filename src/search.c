@@ -180,7 +180,8 @@ void minibuffer_complete_path(void)
 /* M-x command names offered by completion (aliases still run, see mx_done) */
 static const char *g_mx_commands[] = { "help", "snake", "sokoban", "describe-bindings",
                                        "query-replace", "query-replace-regexp",
-                                       "replace-string", "goto-line", NULL };
+                                       "replace-string", "goto-line",
+                                       "json-pretty-print", "xml-pretty-print", NULL };
 
 void minibuffer_complete_command(void)
 {
@@ -481,8 +482,12 @@ void mx_done(const char *cmd)
     start_replace();
   else if (!strcmp(cmd, "goto-line"))
     start_goto_line();
+  else if (!strcmp(cmd, "json-pretty-print"))
+    pretty_print_json_line(g_ed);
+  else if (!strcmp(cmd, "xml-pretty-print"))
+    pretty_print_xml_line(g_ed);
   else if (cmd[0])
-    snprintf(g_message, sizeof g_message, "No command: %s  (try: help, snake, sokoban, query-replace)", cmd);
+    snprintf(g_message, sizeof g_message, "No command: %s  (try: help, json-pretty-print, xml-pretty-print)", cmd);
 }
 void start_mx(void) { start_minibuffer_init("M-x ", mx_done, 2, NULL); }  /* 2 = command completion */
 
