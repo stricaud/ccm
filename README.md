@@ -94,7 +94,13 @@ an existing one).
 src/            editor sources (cacamacs.c, ui.c, edit.c, search.c, …)
 docs/           feature docs + the colour-theme sample
 examples/       config sample and language extensions
+packaging/      cross-platform bundles + pip wheels (build.sh → wheel.py)
 scripts/        macOS packaging
 CMakeLists.txt  standalone build (finds gtcaca via pkg-config)
 run.sh          build-and-run helper
 ```
+
+## License
+
+Released into the public domain under [the Unlicense](LICENSE) — do whatever you
+want with it.
