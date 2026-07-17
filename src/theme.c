@@ -113,6 +113,12 @@ void ccm_theme_load(void)
     col_t col = {0,0,0};
     int known = 1;
     lineno++;
+    /* Skip full-line comments and blanks: a '#' as the first non-blank char is
+       a comment, even when the line contains an '=' (e.g. a "key = colour"
+       example in the header). A '#' on the value side is still a hex colour —
+       that is handled after the '=' split below. */
+    { char *q = p; while (*q && isspace((unsigned char)*q)) q++;
+      if (*q == '#' || *q == '\0') continue; }
     eq = strchr(p, '=');
     if (!eq) continue;
     *eq = '\0'; k = trim(p); v = trim(eq + 1);   /* trim first: a leading '#' is a hex value, not a comment */
