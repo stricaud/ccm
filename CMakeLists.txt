@@ -61,6 +61,10 @@ endif()
 # first (`make install`, its .pkg, or `brew install gtcaca`), which drops
 # gtcaca.pc on the pkg-config path. gtcaca.pc already Requires: caca, so libcaca
 # comes in transitively; we pkg-check it too for its include dir and clarity.
+#
+# In CI the same path is used: packaging/build.sh installs gtcaca into a staging
+# prefix and puts that on PKG_CONFIG_PATH, so nothing here needs a source-tree
+# escape hatch.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTCACA REQUIRED gtcaca)
 pkg_check_modules(LIBCACA REQUIRED caca)
@@ -87,10 +91,13 @@ target_link_libraries(ccm
   ${GTCACA_LDFLAGS}
   ${CMAKE_DL_LIBS})
 
-# Let the installed binary find libgtcaca.dylib wherever pkg-config located it,
-# without relying on a system-wide DYLD path.
-if(APPLE)
+# Let the freshly built binary find libgtcaca/libcaca wherever pkg-config
+# located them (e.g. CI's staging prefix), without a system-wide DYLD/LD path,
+# so it runs from the build tree for the packaging smoke tests. Windows has no
+# rpath — the packaging script ships the DLLs beside ccm.exe instead.
+if(NOT WIN32)
   set_target_properties(ccm PROPERTIES
+    BUILD_RPATH   "${GTCACA_LIBRARY_DIRS};${LIBCACA_LIBRARY_DIRS}"
     INSTALL_RPATH "${GTCACA_LIBRARY_DIRS};${LIBCACA_LIBRARY_DIRS}")
 endif()
 

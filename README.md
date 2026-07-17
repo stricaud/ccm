@@ -21,6 +21,23 @@ reference and feature tour.
 > development now happens here, against gtcaca as an ordinary external
 > dependency.
 
+## Install with pip
+
+Prebuilt binaries are published to PyPI for macOS (Apple Silicon), Linux
+(x86_64) and Windows (x86_64) — no compiler or Homebrew needed:
+
+```sh
+pip install cacamacs
+ccm            # or: cacamacs
+```
+
+PyPI is used purely as a binary channel (as `ruff`/`cmake`/`ninja` do): the
+wheel carries the compiled `ccm` and the `libgtcaca`/`libcaca`/`oniguruma`
+libraries it needs, made relocatable, plus the sample language extensions so
+syntax highlighting works out of the box. See [packaging/](packaging/) for how
+the per-platform wheels are built (`packaging/build.sh` → `packaging/wheel.py`,
+wired up in `.github/workflows/release.yml`, which publishes on a `v*` tag).
+
 ## Building
 
 ccm consumes gtcaca like any third party would: install gtcaca first, then
