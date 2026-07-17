@@ -108,11 +108,13 @@ jobs:
       - name: Smoke-test the bundle (Linux/macOS)
         if: runner.os != 'Windows'
         working-directory: ccm
+        timeout-minutes: 5
         run: python3 packaging/smoke.py "$(echo dist/cacamacs-*/bin/ccm)"
 
       - name: Smoke-test the bundle (Windows)
         if: runner.os == 'Windows'
         working-directory: ccm
+        timeout-minutes: 5
         run: python packaging/smoke.py "$(echo dist/cacamacs-*/ccm.exe)"
 
       # Repack the bundle we just smoke-tested as a wheel, so `pip install
@@ -135,6 +137,7 @@ jobs:
       - name: Build & smoke-test the wheel
         working-directory: ccm
         shell: bash
+        timeout-minutes: 10
         env:
           CCM_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |

@@ -112,22 +112,53 @@ def run_posix(cmd: list[str]) -> int:
 
 def run_windows(cmd: list[str]) -> int:
     import subprocess
+    import tempfile
+    import time
 
+    # Capture to a temp FILE, never a PIPE. The `cacamacs`/`ccm` console script
+    # is a launcher that spawns ccm.exe as a grandchild; a TUI blocked on
+    # console input (the piped C-x C-c never reaches it — libcaca reads the
+    # console, not stdin) keeps the pipe's write end open, so a PIPE read
+    # deadlocks even after the launcher is killed. A file is read at the end and
+    # never blocks. This is the hang that stalled CI for hours.
+    log = tempfile.TemporaryFile()
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
-        p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                             stdout=log, stderr=subprocess.STDOUT,
+                             creationflags=flags)
     except OSError as e:
+        log.close()
         return _verdict(str(e).encode(), started=False)
 
-    out = b""
-    try:
-        out, _ = p.communicate(input=QUIT, timeout=WATCHDOG)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        out, _ = p.communicate()
+    # A missing DLL exits almost immediately (STATUS_DLL_NOT_FOUND); a healthy
+    # binary reaches the UI and blocks on console input that never arrives. So
+    # wait a few seconds: still alive ⇒ it started and its libraries resolved.
+    deadline = time.time() + WATCHDOG
+    while time.time() < deadline and p.poll() is None:
+        time.sleep(0.2)
 
-    # 0xC0000135 = STATUS_DLL_NOT_FOUND — a delay/loaded DLL was missing.
-    if p.returncode in (0xC0000135, -1073741515):
+    alive = p.poll() is None
+    if alive:
+        # Kill the whole tree (launcher → ccm.exe); killing just the launcher
+        # would leak ccm.exe and hang the runner.
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=10)
+        except Exception:
+            p.kill()
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            pass
+
+    log.seek(0)
+    out = log.read()
+    log.close()
+
+    # 0xC0000135 = STATUS_DLL_NOT_FOUND — a load-time DLL was missing.
+    if not alive and p.returncode in (0xC0000135, -1073741515):
         out += b"\nDLL was not found (STATUS_DLL_NOT_FOUND)"
     return _verdict(out, started=True)
 
