@@ -8,7 +8,10 @@
 #include <time.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <sys/ioctl.h>
+#include <strings.h>        /* strcasecmp / strncasecmp (POSIX + MinGW-w64) */
+#ifndef _WIN32
+#include <sys/ioctl.h>      /* struct winsize, TIOCGWINSZ — POSIX only */
+#endif
 #include <unistd.h>
 #include <limits.h>
 #include <caca.h>
@@ -29,6 +32,18 @@
 #endif
 #ifndef NAME_MAX
 #define NAME_MAX 255
+#endif
+
+/* realpath(3) is POSIX-only; MinGW's _fullpath canonicalises a path into a
+   caller-provided buffer with the same NULL-on-failure contract, so call sites
+   are unchanged. (_fullpath does not require the path to exist — harmless here,
+   where every caller only resolves directories it has just stat'd.) */
+#ifdef _WIN32
+static inline char *ccm_realpath(const char *path, char *resolved) {
+  return _fullpath(resolved, path, PATH_MAX);
+}
+#else
+#define ccm_realpath realpath
 #endif
 #define KEY_CTRL_SPACE 0x00
 #define KEY_CTRL_S     0x13
@@ -214,6 +229,7 @@ const char *langid_from_ext(const char *ext);
 void load_config(void);
 char *read_file(const char *path);
 void refresh_modeline(gtcaca_editor_widget_t *ed, void *ud);
+const char *compact_path(const char *s, char *out, size_t outsz, int maxw);
 int scan_root_grammar(const char *root, const char *ext, const char *base, char *out_path, int psz, char *out_id, int idsz);
 gtcaca_editor_langcfg_t *scan_root_langcfg(const char *root, const char *ext, const char *base, char *out_id, int idsz);
 void setup_language(gtcaca_editor_widget_t *ed, const char *filename, const char *explicit_cfg);

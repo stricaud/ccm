@@ -99,8 +99,12 @@ static void run_test(void)
 {
   int W = caca_get_canvas_width(gmo.cv), H = caca_get_canvas_height(gmo.cv), y, x;
   const char *drv = caca_get_display_driver(gmo.dp);
-  struct winsize ws; int have = (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0);
+  int have = 0, tw = 0, th = 0;   /* terminal size from the OS, if available */
   caca_event_t ev;
+#ifndef _WIN32
+  { struct winsize ws;            /* TIOCGWINSZ is POSIX-only */
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) { have = 1; tw = ws.ws_col; th = ws.ws_row; } }
+#endif
 
   caca_set_color_ansi(gmo.cv, CACA_LIGHTGRAY, CACA_BLACK); caca_clear_canvas(gmo.cv);
   for (y = 0; y < H; y++) {
@@ -110,7 +114,7 @@ static void run_test(void)
   }
   caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, CACA_BOLD);
   caca_printf(gmo.cv, 8, 1, "ccm --test   libcaca canvas = %d cols x %d rows", W, H);
-  if (have) caca_printf(gmo.cv, 8, 2, "terminal (ioctl)            = %d cols x %d rows", ws.ws_col, ws.ws_row);
+  if (have) caca_printf(gmo.cv, 8, 2, "terminal (ioctl)            = %d cols x %d rows", tw, th);
   caca_printf(gmo.cv, 8, 3, "libcaca driver              = %s", drv ? drv : "(unknown)");
   caca_printf(gmo.cv, 8, 5, "Do you see the CYAN bar on the very last row (row %d)?", H - 1);
   caca_printf(gmo.cv, 8, 6, "And the YELLOW bar just above it (row %d)?", H - 2);
@@ -127,7 +131,7 @@ static void run_test(void)
 
   /* also to stderr, so the numbers survive even if those rows don't render */
   fprintf(stderr, "ccm --test:\n  libcaca canvas : %d cols x %d rows\n", W, H);
-  if (have) fprintf(stderr, "  terminal ioctl : %d cols x %d rows\n", ws.ws_col, ws.ws_row);
+  if (have) fprintf(stderr, "  terminal ioctl : %d cols x %d rows\n", tw, th);
   fprintf(stderr, "  libcaca driver : %s\n", drv ? drv : "(unknown)");
   fprintf(stderr, "  If the status bar is missing, run with CCM_BOTTOM_MARGIN=1 (or 2).\n");
 }
@@ -266,7 +270,7 @@ int main(int argc, char **argv)
   }
 
   if (open_dir) {
-    if (!realpath(arg, g_curdir)) { strncpy(g_curdir, arg, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
+    if (!ccm_realpath(arg, g_curdir)) { strncpy(g_curdir, arg, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
     show_browser();
   }
 

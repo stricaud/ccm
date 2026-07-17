@@ -10,6 +10,22 @@ int _cmp_bent(const void *a, const void *b)
   return strcmp(x->name, y->name);
 }
 
+/* Is a browser entry a directory? Prefer dirent's d_type (fast, no stat) and
+   fall back to stat() when the filesystem reports DT_UNKNOWN. MinGW-w64's
+   struct dirent has no d_type field at all, so it always takes the stat path;
+   macOS/Linux have d_type but macOS omits glibc's _DIRENT_HAVE_D_TYPE, hence the
+   guard is simply "not Windows". */
+static int entry_is_dir(const char *dir, const struct dirent *de)
+{
+  char p[PATH_MAX]; struct stat st; int need;
+#ifndef _WIN32
+  if (de->d_type == DT_DIR)      return 1;
+  if (de->d_type != DT_UNKNOWN)  return 0;
+#endif
+  need = snprintf(p, sizeof p, "%s/%s", dir, de->d_name);
+  return (need > 0 && need < (int)sizeof p && stat(p, &st) == 0) ? S_ISDIR(st.st_mode) : 0;
+}
+
 /* Render the directory listing into the read-only browser editor. */
 void populate_browser(const char *dir)
 {
@@ -22,19 +38,14 @@ void populate_browser(const char *dir)
 
   /* Canonicalise into a SEPARATE buffer first: `dir` may alias g_curdir
      (show_browser passes g_curdir), and realpath() with src==dst is UB. */
-  if (realpath(dir, resolved)) { strncpy(g_curdir, resolved, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
+  if (ccm_realpath(dir, resolved)) { strncpy(g_curdir, resolved, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
   else if (dir != g_curdir)    { strncpy(g_curdir, dir, sizeof g_curdir - 1);      g_curdir[sizeof g_curdir - 1] = '\0'; }
 
   if (d) {
     while ((de = readdir(d)) != NULL && n < 2048) {
       int isdir;
       if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
-      isdir = (de->d_type == DT_DIR);
-      if (de->d_type == DT_UNKNOWN) {
-        struct stat st; char p[PATH_MAX];
-        int need = snprintf(p, sizeof p, "%s/%s", g_curdir, de->d_name);
-        if (need > 0 && need < (int)sizeof p && stat(p, &st) == 0) isdir = S_ISDIR(st.st_mode);
-      }
+      isdir = entry_is_dir(g_curdir, de);
       strncpy(ents[n].name, de->d_name, sizeof ents[n].name - 1);
       ents[n].name[sizeof ents[n].name - 1] = '\0';
       ents[n].isdir = isdir;
@@ -72,7 +83,7 @@ static int g_browser_open = 0;
 
 void show_browser(void)
 {
-  if (!g_curdir[0]) { if (!realpath(".", g_curdir)) strcpy(g_curdir, "."); }
+  if (!g_curdir[0]) { if (!ccm_realpath(".", g_curdir)) strcpy(g_curdir, "."); }
   pane_hide_all();                 /* modal: only the browser is visible */
   gtcaca_widget_show(GTCACA_WIDGET(g_browser_win));
   gtcaca_widget_show(GTCACA_WIDGET(g_browser_ed));
@@ -175,10 +186,18 @@ void browser_open_current(void)
 /* Modeline shown while the browser is focused. */
 void browser_modeline(gtcaca_editor_widget_t *ed, void *ud)
 {
-  char t[256];
+  char t[256], dirbuf[128];
+  /* Keep the command hints visible: cap the directory to half the bar (the
+     path is the browser's main content, so it gets a bigger budget than the
+     editor's file name). */
+  int w = caca_get_canvas_width(gmo.cv), budget = w / 2;
+  const char *dir;
   (void)ed; (void)ud;
-  if (g_message[0]) snprintf(t, sizeof t, "  Browser  %s   %s", g_curdir, g_message);
-  else snprintf(t, sizeof t, "  Browser  %s   arrows move  C-s search  Enter open  q quit", g_curdir);
+  if (budget < 16) budget = 16;
+  if (budget > 60) budget = 60;
+  dir = compact_path(g_curdir, dirbuf, sizeof dirbuf, budget);
+  if (g_message[0]) snprintf(t, sizeof t, "  Browser  %s   %s", dir, g_message);
+  else snprintf(t, sizeof t, "  Browser  %s   arrows move  C-s search  Enter open  q quit", dir);
   gtcaca_statusbar_set_text(g_modeline, t);
 }
 

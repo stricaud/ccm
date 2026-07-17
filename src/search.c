@@ -297,7 +297,7 @@ void find_file_done(const char *input)
   /* A directory opens the file browser (like Emacs dired). */
   if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
     char resolved[PATH_MAX];
-    if (realpath(path, resolved)) { strncpy(g_curdir, resolved, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
+    if (ccm_realpath(path, resolved)) { strncpy(g_curdir, resolved, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
     else { strncpy(g_curdir, path, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
     show_browser();
     return;

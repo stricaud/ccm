@@ -1,13 +1,45 @@
 #include "cacamacs.h"
 /* ── modeline ──────────────────────────────────────────────────────────────── */
 
+/* Fit a path/name into the modeline without letting it swallow the whole bar
+   (which pushes the L/C position and the key-binding hints off the right edge).
+   If it already fits in `maxw` columns, copy it verbatim; otherwise keep its
+   head and a larger tail around a middle ellipsis, so both a hint of the
+   location and the all-important trailing name/extension survive. UTF-8 aware:
+   never cuts in the middle of a multi-byte character. Returns `out`. */
+const char *compact_path(const char *s, char *out, size_t outsz, int maxw)
+{
+  int len, keep, head, tail;
+  const char *tp;
+  if (!s) s = "";
+  len = (int)strlen(s);
+  if (maxw < 4) maxw = 4;
+  if (len <= maxw) { snprintf(out, outsz, "%s", s); return out; }
+
+  keep = maxw - 1;                 /* one column is spent on the ellipsis */
+  tail = keep * 2 / 3;             /* favour the tail: the file name lives there */
+  head = keep - tail;
+  while (head > 0 && ((unsigned char)s[head] & 0xC0) == 0x80) head--;  /* end on a char */
+  tp = s + len - tail;
+  while (((unsigned char)*tp & 0xC0) == 0x80) tp++;                    /* start on a char */
+  snprintf(out, outsz, "%.*s…%s", head, s, tp);
+  return out;
+}
+
 void refresh_modeline(gtcaca_editor_widget_t *ed, void *ud)
 {
-  char text[256];
+  char text[256], namebuf[128];
   int line = gtcaca_editor_get_current_line(ed) + 1;
   int col  = gtcaca_editor_get_column(ed, gtcaca_editor_get_current_pos(ed)) + 1;
-  const char *name = g_filename ? g_filename : "*scratch*";
+  /* Budget the name to a third of the bar (clamped), leaving the rest for the
+     language, position and the command hints. */
+  int w = caca_get_canvas_width(gmo.cv), budget = w / 3;
+  const char *name;
   const char *mod  = gtcaca_editor_get_modify(ed) ? "**" : "--";
+
+  if (budget < 12) budget = 12;
+  if (budget > 40) budget = 40;
+  name = compact_path(g_filename ? g_filename : "*scratch*", namebuf, sizeof namebuf, budget);
 
   (void)ud;
   show_paren(ed);
@@ -365,8 +397,12 @@ gtcaca_editor_langcfg_t *discover_langcfg(const char *filename,
   const char *ext  = filename ? strrchr(filename, '.') : NULL;
   const char *base = filename ? (strrchr(filename, '/') ? strrchr(filename, '/') + 1 : filename) : NULL;
   int r;
-  if (!home || !filename) return NULL;
-  for (r = 0; r < N_EXT_ROOTS; r++) {
+  if (!filename) return NULL;
+  /* The home-relative roots (~/.ccm, ~/.vscode, …) need $HOME; the builtin and
+     absolute roots below do not. Skipping only this loop when $HOME is unset
+     (e.g. a native Windows process) still lets the shipped grammars load via
+     CCM_BUILTIN_EXTENSIONS. */
+  if (home) for (r = 0; r < N_EXT_ROOTS; r++) {
     char extdir[1024];
     gtcaca_editor_langcfg_t *res;
     snprintf(extdir, sizeof extdir, "%s%s", home, g_ext_roots[r]);
@@ -451,8 +487,10 @@ int discover_grammar(const char *filename, char *out_path, int psz, char *out_id
   const char *ext  = filename ? strrchr(filename, '.') : NULL;
   const char *base = filename ? (strrchr(filename, '/') ? strrchr(filename, '/') + 1 : filename) : NULL;
   int r;
-  if (!home || !filename) return 0;
-  for (r = 0; r < N_EXT_ROOTS; r++) {
+  if (!filename) return 0;
+  /* $HOME-relative roots are optional (see discover_langcfg): without it the
+     builtin/absolute roots below still provide the shipped grammars. */
+  if (home) for (r = 0; r < N_EXT_ROOTS; r++) {
     char extdir[1024];
     snprintf(extdir, sizeof extdir, "%s%s", home, g_ext_roots[r]);
     if (scan_root_grammar(extdir, ext, base, out_path, psz, out_id, idsz)) return 1;
