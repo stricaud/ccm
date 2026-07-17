@@ -136,6 +136,10 @@ static void run_test(void)
   fprintf(stderr, "  If the status bar is missing, run with CCM_BOTTOM_MARGIN=1 (or 2).\n");
 }
 
+#ifndef CCM_VERSION_STR
+#define CCM_VERSION_STR "0.0.0"
+#endif
+
 int main(int argc, char **argv)
 {
   int cw, ch, i, b0;
@@ -143,6 +147,16 @@ int main(int argc, char **argv)
   const char *open_file_path = NULL;
   int open_dir = 0;
   long goto_line_arg = 0;
+
+  /* --version / -v: print and exit *before* opening any display. This is also
+     the packaging smoke test's entry point — the OS resolves ccm's whole
+     dylib/DLL closure (gtcaca, libcaca, oniguruma) at load, before main runs,
+     so reaching this line already proves the libraries resolved; then we exit
+     cleanly with no TUI left running to orphan a CI runner. */
+  if (arg && (!strcmp(arg, "--version") || !strcmp(arg, "-v"))) {
+    printf("ccm (cacamacs) %s\n", CCM_VERSION_STR);
+    return 0;
+  }
 
   gtcaca_init(&argc, &argv);
   if (arg && !strcmp(arg, "--test")) { run_test(); caca_free_display(gmo.dp); return 0; }

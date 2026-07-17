@@ -17,6 +17,11 @@ endif()
 project(ccm C)
 
 set(CCM_VERSION "0.0.0")
+# Let CI stamp the real version: the release workflow passes the git tag as
+# $CCM_VERSION (used by packaging/wheel.py too). Cosmetic — `ccm --version`.
+if(DEFINED ENV{CCM_VERSION} AND NOT "$ENV{CCM_VERSION}" STREQUAL "")
+  set(CCM_VERSION "$ENV{CCM_VERSION}")
+endif()
 
 if(${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR})
   message(FATAL_ERROR "In-source builds are not allowed. Build from a subdir:
@@ -75,6 +80,10 @@ add_executable(ccm
   src/cacamacs.c src/games.c
   src/edit.c src/search.c src/keymap.c src/lang.c src/ui.c
   src/spell.c src/theme.c)
+
+# Compiled-in version string for `ccm --version` (the packaging smoke test's
+# entry point — it forces the loader to resolve every dylib/DLL, then exits).
+target_compile_definitions(ccm PRIVATE CCM_VERSION_STR="${CCM_VERSION}")
 
 target_include_directories(ccm PRIVATE
   src
