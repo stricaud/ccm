@@ -97,7 +97,7 @@ message(STATUS "libcaca: ${LIBCACA_LDFLAGS}")
 add_executable(ccm
   src/cacamacs.c src/games.c
   src/edit.c src/search.c src/keymap.c src/lang.c src/ui.c
-  src/spell.c src/theme.c)
+  src/spell.c src/theme.c src/diagram.c src/diagram_model.c)
 
 # Compiled-in version string for `ccm --version` (the packaging smoke test's
 # entry point — it forces the loader to resolve every dylib/DLL, then exits).

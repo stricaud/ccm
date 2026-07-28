@@ -1,0 +1,13 @@
+# build tree
+/build/
+*.o
+*.dylib
+
+# packaging output (bundles + wheels)
+/dist/
+
+# macOS
+.DS_Store
+
+# packaging output
+/ccm-*.pkg

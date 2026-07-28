@@ -13,6 +13,22 @@ ccm [file | directory] [language-configuration.json]
 - A **directory** opens the file browser (also `C-x d`).
 - An optional explicit `language-configuration.json` forces that config.
 
+It also has a **diagram mode** (`M-x diagram`): a drag-and-drop canvas for ASCII
+diagrams. Pick a shape from the pane on the left — box, rounded, diamond,
+circle, ellipse, cloud, cylinder, hexagon, actor or free text — drop it on the
+canvas with the mouse or the keyboard, link any two by clicking one then the
+other, rub out single characters with the eraser. Leaving drops the finished
+art into your document at the cursor — plain characters, saved with `C-x C-s`
+like anything else.
+
+```
+                         +-------+              .-----------.
+     O                  /         \             |'---------'|
+    /|\        +------>+   ok?     +----------->|   store   |
+    / \   -----+        \         /             |           |
+   user                  +-------+              '-----------'
+```
+
 See [docs/README-cacamacs.md](docs/README-cacamacs.md) for the full key-binding
 reference and feature tour.
 
@@ -92,6 +108,7 @@ an existing one).
 
 ```
 src/            editor sources (cacamacs.c, ui.c, edit.c, search.c, …)
+                diagram.c / diagram_model.c — M-x diagram (mode / document)
 docs/           feature docs + the colour-theme sample
 examples/       config sample and language extensions
 packaging/      cross-platform bundles + pip wheels (build.sh → wheel.py)

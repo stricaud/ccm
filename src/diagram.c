@@ -1,0 +1,1422 @@
+/* diagram.c — M-x diagram: a drag-and-drop canvas for ASCII diagrams.
+ *
+ * Artist-mode draws characters; this draws *objects*. A box is a thing you
+ * grab, drag, resize and label; a connector is a thing that stays attached to
+ * the two boxes it joins and re-routes itself when either moves. The file on
+ * disk is still nothing but the ASCII art (see diagram_model.c), so a diagram
+ * drops straight into a README, a comment block or an email.
+ *
+ * The canvas is a gtcaca custom widget: we paint every cell ourselves and take
+ * the mouse press → motion → release gesture that the toolkit hands us, which
+ * is what makes dragging work in a terminal. */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+#include <caca.h>
+#include <gtcaca/main.h>
+#include <gtcaca/window.h>
+#include <gtcaca/custom.h>
+#include <gtcaca/box.h>
+
+#include "cacamacs.h"
+#include "diagram.h"
+
+enum { TOOL_SELECT = 0, TOOL_SHAPE, TOOL_TEXT, TOOL_CONN, TOOL_ERASE };
+enum { DRAG_NONE = 0, DRAG_MOVE, DRAG_RESIZE, DRAG_CONNECT, DRAG_NEWSHAPE, DRAG_PAN,
+       DRAG_PALETTE, DRAG_ERASE };
+
+#define UNDO_MAX 64
+#define PALETTE_W 20        /* columns the shape pane takes on the left */
+
+/* The palette, top to bottom. Every entry is reachable three ways: click it,
+   press its digit, or drag it onto the canvas. */
+typedef struct { char key; int tool, shape; const char *name; } palette_entry_t;
+
+static const palette_entry_t PALETTE[] = {
+  { '1', TOOL_SELECT, -1,           "Select"   },
+  { '2', TOOL_SHAPE,  DGM_RECT,     "Box"      },
+  { '3', TOOL_SHAPE,  DGM_ROUNDED,  "Rounded"  },
+  { '4', TOOL_SHAPE,  DGM_DIAMOND,  "Diamond"  },
+  { '5', TOOL_SHAPE,  DGM_CIRCLE,   "Circle"   },
+  { '6', TOOL_SHAPE,  DGM_ELLIPSE,  "Ellipse"  },
+  { '7', TOOL_SHAPE,  DGM_CLOUD,    "Cloud"    },
+  { '8', TOOL_SHAPE,  DGM_CYLINDER, "Cylinder" },
+  { '9', TOOL_SHAPE,  DGM_HEXAGON,  "Hexagon"  },
+  { '0', TOOL_SHAPE,  DGM_ACTOR,    "Actor"    },
+  { 't', TOOL_TEXT,   -1,           "Text"     },
+  { 'l', TOOL_CONN,   -1,           "Link"     },
+  { 'e', TOOL_ERASE,  -1,           "Eraser"   },
+};
+#define PALETTE_N ((int)(sizeof PALETTE / sizeof PALETTE[0]))
+
+/* An undo step carries a snapshot of the object list, a patch of raw cells, or
+   both — an eraser stroke that cuts into a shape changes both at once. The raw
+   layer is a grid, not a list, so patching cells beats snapshotting half a
+   megabyte per stroke. */
+typedef struct { dgm_shape_t *s; int n; dgm_cell_t *cells; int ncells; } undo_t;
+
+#define ERASE_MAX 8192
+static dgm_cell_t   g_stroke[ERASE_MAX];  /* raw cells the stroke in flight changed */
+static int          g_nstroke;
+static dgm_shape_t *g_stroke_shapes;      /* objects as they were when it started */
+static int          g_stroke_nshapes;
+
+static gtcaca_window_widget_t *g_dw;
+static gtcaca_custom_widget_t *g_dview;
+static dgm_doc_t              *g_doc;
+static dgm_grid_t              g_grid;          /* scratch render target */
+static int  g_dgm_open;
+
+static int  g_sel = -1;                         /* selected shape, -1 for none */
+static int  g_tool = TOOL_SELECT;
+static int  g_shape = DGM_RECT;                 /* which shape the shape tool draws */
+static int  g_pal = 1;                          /* the palette pane is shown         */
+static int  g_pal_sel;                          /* highlighted palette row           */
+static int  g_cur_x, g_cur_y;                   /* keyboard cursor, in canvas cells  */
+static int  g_conn_from = -1;                   /* "now pick the other end"          */
+static int  g_vx, g_vy;                         /* top-left canvas cell on screen */
+static int  g_modified;
+static int  g_ins_start, g_ins_end;             /* buffer range the drawing replaces */
+static char g_dgm_msg[192];
+static int  g_show_help;
+
+static int  g_drag = DRAG_NONE;
+static int  g_drag_shape = -1;
+static int  g_drag_ox, g_drag_oy;               /* grab point inside the shape */
+static int  g_drag_x0, g_drag_y0;               /* where the press landed (canvas) */
+static int  g_drag_x1, g_drag_y1;               /* where the pointer is now  */
+
+static int  g_editing;                          /* typing a label */
+static char g_edit_buf[DGM_LABEL_MAX];
+static int  g_edit_len;
+
+static int  g_confirm_quit;                     /* y/n/C-g answer wanted */
+
+static undo_t g_undo[UNDO_MAX];
+static int    g_undo_n;
+
+static void dgm_status(void);
+
+/* ── undo ────────────────────────────────────────────────────────────────────
+   Snapshots are of the object list only: the raw layer is set once, when a
+   file is parsed, and never edited. */
+
+/* Remember what a finished eraser stroke changed: the characters it rubbed out
+   and, if it cut into a shape, the object list from before. */
+static void undo_push_cells(void)
+{
+  undo_t u;
+  if (g_nstroke <= 0 && !g_stroke_shapes) return;
+  u.s = g_stroke_shapes; u.n = g_stroke_nshapes;
+  g_stroke_shapes = NULL; g_stroke_nshapes = 0;
+  u.ncells = g_nstroke;
+  if (g_nstroke <= 0) { u.cells = NULL; g_nstroke = 0;
+                        if (g_undo_n < UNDO_MAX) { g_undo[g_undo_n++] = u; } else free(u.s);
+                        return; }
+  u.cells = malloc((size_t)g_nstroke * sizeof *u.cells);
+  if (!u.cells) { g_nstroke = 0; return; }
+  memcpy(u.cells, g_stroke, (size_t)g_nstroke * sizeof *u.cells);
+  if (g_undo_n == UNDO_MAX) {
+    free(g_undo[0].s); free(g_undo[0].cells);
+    memmove(&g_undo[0], &g_undo[1], (size_t)(UNDO_MAX - 1) * sizeof g_undo[0]);
+    g_undo_n--;
+  }
+  g_undo[g_undo_n++] = u;
+  g_nstroke = 0;
+}
+
+static void undo_push(void)
+{
+  undo_t u;
+  u.cells = NULL; u.ncells = 0;
+  u.n = g_doc->n;
+  u.s = malloc((size_t)(u.n ? u.n : 1) * sizeof *u.s);
+  if (!u.s) return;
+  memcpy(u.s, g_doc->s, (size_t)u.n * sizeof *u.s);
+  if (g_undo_n == UNDO_MAX) {                   /* drop the oldest */
+    free(g_undo[0].s); free(g_undo[0].cells);
+    memmove(&g_undo[0], &g_undo[1], (size_t)(UNDO_MAX - 1) * sizeof g_undo[0]);
+    g_undo_n--;
+  }
+  g_undo[g_undo_n++] = u;
+}
+
+static void undo_pop(void)
+{
+  undo_t u;
+  if (g_undo_n == 0) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Nothing to undo"); return; }
+  u = g_undo[--g_undo_n];
+  if (u.cells) {                                /* put erased characters back */
+    int i;
+    for (i = 0; i < u.ncells; i++)
+      dgm_raw_put(g_doc, u.cells[i].x, u.cells[i].y, u.cells[i].ch);
+    free(u.cells);
+  }
+  if (u.s) {                                    /* and any objects it dissolved */
+    memcpy(g_doc->s, u.s, (size_t)u.n * sizeof *u.s);
+    g_doc->n = u.n;
+    free(u.s);
+    if (g_sel >= g_doc->n) g_sel = -1;
+  }
+  snprintf(g_dgm_msg, sizeof g_dgm_msg, u.cells ? "Undo — %d character%s back" : "Undo",
+           u.ncells, u.ncells == 1 ? "" : "s");
+  g_modified = 1;
+}
+
+static void undo_clear(void)
+{
+  while (g_undo_n > 0) {
+    g_undo_n--;
+    free(g_undo[g_undo_n].s);
+    free(g_undo[g_undo_n].cells);
+  }
+  g_nstroke = 0;
+}
+
+/* ── screen ↔ canvas ─────────────────────────────────────────────────────────
+   The widget's last row is the hint bar and, when it is shown, its leftmost
+   PALETTE_W columns are the shape pane; the canvas viewport is what is left. */
+
+static int pal_w(void)   { return g_pal ? PALETTE_W : 0; }
+static int view_x0(void) { return g_dview->x + pal_w(); }
+static int view_w(void)  { return g_dview ? g_dview->width - pal_w() : 0; }
+static int view_h(void)  { return g_dview ? g_dview->height - 1 : 0; }
+static int scr_x(int cx) { return view_x0() + (cx - g_vx); }
+static int scr_y(int cy) { return g_dview->y + (cy - g_vy); }
+static int canvas_x(int sx) { return sx - view_x0() + g_vx; }
+static int canvas_y(int sy) { return sy - g_dview->y + g_vy; }
+static int on_canvas(int sx, int sy)
+{
+  return sx >= view_x0() && sx < view_x0() + view_w() &&
+         sy >= g_dview->y && sy < g_dview->y + view_h();
+}
+/* Which palette row a click landed on, or -1. */
+static int palette_row_at(int sx, int sy)
+{
+  int row = sy - (g_dview->y + 2);
+  if (!g_pal || sx < g_dview->x || sx >= g_dview->x + PALETTE_W) return -1;
+  return (row >= 0 && row < PALETTE_N) ? row : -1;
+}
+
+/* Keep the selected shape (or a point of interest) in view. */
+static void scroll_to(int cx, int cy)
+{
+  if (cx < g_vx) g_vx = cx;
+  if (cy < g_vy) g_vy = cy;
+  if (cx >= g_vx + view_w())  g_vx = cx - view_w() + 1;
+  if (cy >= g_vy + view_h())  g_vy = cy - view_h() + 1;
+  if (g_vx < 0) g_vx = 0;
+  if (g_vy < 0) g_vy = 0;
+}
+
+static void scroll_to_sel(void)
+{
+  const dgm_shape_t *s;
+  if (g_sel < 0 || g_sel >= g_doc->n) return;
+  s = &g_doc->s[g_sel];
+  if (s->kind == DGM_CONN) return;
+  scroll_to(s->x, s->y);
+  scroll_to(s->x + s->w - 1, s->y + s->h - 1);
+}
+
+/* ── painting ────────────────────────────────────────────────────────────────*/
+
+static void put(int x, int y, uint32_t ch, uint8_t fg, uint8_t bg)
+{
+  caca_set_color_ansi(gmo.cv, fg, bg);
+  caca_set_attr(gmo.cv, 0);
+  caca_put_char(gmo.cv, x, y, ch);
+}
+
+/* Draw a UTF-8 string, one codepoint per cell, stopping after `maxw` cells. */
+static void put_str_clipped(int x, int y, const char *s, int maxw, uint8_t fg, uint8_t bg)
+{
+  int n = 0;
+  caca_set_color_ansi(gmo.cv, fg, bg);
+  caca_set_attr(gmo.cv, 0);
+  while (*s && n < maxw) {
+    const unsigned char *u = (const unsigned char *)s;
+    uint32_t cp = *u;
+    int len = 1;
+    if      ((*u & 0xe0) == 0xc0 && u[1])               { cp = ((uint32_t)(*u & 0x1f) << 6) | (u[1] & 0x3f); len = 2; }
+    else if ((*u & 0xf0) == 0xe0 && u[1] && u[2])       { cp = ((uint32_t)(*u & 0x0f) << 12) | ((uint32_t)(u[1] & 0x3f) << 6) | (u[2] & 0x3f); len = 3; }
+    else if ((*u & 0xf8) == 0xf0 && u[1] && u[2] && u[3]) { cp = ((uint32_t)(*u & 0x07) << 18) | ((uint32_t)(u[1] & 0x3f) << 12) | ((uint32_t)(u[2] & 0x3f) << 6) | (u[3] & 0x3f); len = 4; }
+    caca_put_char(gmo.cv, x + n, y, cp);
+    s += len; n++;
+  }
+}
+
+/* What the renderer put in a canvas cell. A connector's endpoint sits one cell
+   outside the box it leaves, which is off-canvas for a box at column 0, so
+   every read goes through here. */
+static uint32_t grid_at(int cx, int cy)
+{
+  if (cx < 0 || cy < 0 || cx >= g_grid.w || cy >= g_grid.h) return ' ';
+  return g_grid.cell[cy * g_grid.w + cx];
+}
+
+/* The rectangle a drag is currently describing (new box / rubber band). */
+static void drag_rect(int *x, int *y, int *w, int *h)
+{
+  int x0 = g_drag_x0 < g_drag_x1 ? g_drag_x0 : g_drag_x1;
+  int y0 = g_drag_y0 < g_drag_y1 ? g_drag_y0 : g_drag_y1;
+  int x1 = g_drag_x0 > g_drag_x1 ? g_drag_x0 : g_drag_x1;
+  int y1 = g_drag_y0 > g_drag_y1 ? g_drag_y0 : g_drag_y1;
+  *x = x0; *y = y0; *w = x1 - x0 + 1; *h = y1 - y0 + 1;
+}
+
+static const char *tool_name(void)
+{
+  switch (g_tool) {
+  case TOOL_SHAPE: return dgm_shape_name(g_shape);
+  case TOOL_TEXT:  return "text";
+  case TOOL_CONN:  return "link";
+  default:        return "select";
+  }
+}
+
+static const char *const help_lines[] = {
+  "  Diagram mode — draw.io in a terminal, saved as plain ASCII",
+  "",
+  "  Getting started",
+  "     Pick a shape in the pane on the left, then click on the canvas.",
+  "     Or drag the shape straight from the pane to where you want it.",
+  "     Type its label, press Enter, and you have your first object.",
+  "",
+  "  Shapes    1 Select   2 Box      3 Rounded   4 Diamond   5 Circle",
+  "            6 Ellipse  7 Cloud    8 Cylinder  9 Hexagon   0 Actor",
+  "            t Text     l Link     e Eraser    p hides / shows the pane",
+  "",
+  "  Eraser    drag rubs out loose characters one cell at a time; a click",
+  "            removes the whole object under it.  u undoes either.",
+  "            x turns the selected object into plain characters first, so",
+  "            the eraser can rub out any part of it.",
+  "",
+  "  Mouse     drag inside an object      move it",
+  "            drag its bottom-right (#)  resize it",
+  "            drag out from its edge     link it to another object",
+  "            click a link's line        select that link",
+  "            drag empty space           pan       wheel  scroll",
+  "",
+  "  Linking   click one object, then click the other (with Link armed) —",
+  "            or drag from a selected object's  o  handle onto another —",
+  "            or select one, press c, Tab to the other, press Enter.",
+  "            Any two objects link, whatever their shapes.",
+  "",
+  "  Keys      Tab      select the next object      Ret   edit its label",
+  "            arrows   move the selection, or the cursor when nothing is picked",
+  "            Ret      with nothing selected, places the armed shape at the cursor",
+  "            < >      narrower / wider            [ ]   shorter / taller",
+  "            r        change the shape            a     flip a link's arrows",
+  "            Del / d  delete      D duplicate     u     undo",
+  "            s        ASCII / Unicode line drawing",
+  "            q insert the diagram at the cursor and leave (C-x C-s then",
+  "              saves the file, C-/ undoes the insert)   Q leave it behind",
+  "            C-g cancel   ? this help",
+  "",
+  "  While typing a label: Ret commits, C-o starts a second line, C-g cancels.",
+  NULL
+};
+
+static void draw_help_overlay(void)
+{
+  int n = 0, w = 0, i, x, y;
+  for (i = 0; help_lines[i]; i++) {
+    int l = (int)strlen(help_lines[i]);
+    if (l > w) w = l;
+    n++;
+  }
+  w += 4;
+  x = view_x0() + (view_w() - w) / 2;
+  y = g_dview->y + (view_h() - (n + 2)) / 2;
+  if (x < view_x0()) x = view_x0();
+  if (y < g_dview->y) y = g_dview->y;
+  for (i = 0; i < n + 2; i++) {
+    int k;
+    for (k = 0; k < w; k++) put(x + k, y + i, ' ', CACA_WHITE, CACA_BLUE);
+  }
+  for (i = 0; i < n; i++)
+    put_str_clipped(x + 1, y + 1 + i, help_lines[i], w - 2, CACA_WHITE, CACA_BLUE);
+}
+
+/* Activate a palette row: the Select/Text/Link rows switch tool, a shape row
+   switches tool *and* arms that shape. */
+static void palette_pick(int row)
+{
+  if (row < 0 || row >= PALETTE_N) return;
+  g_pal_sel = row;
+  g_tool = PALETTE[row].tool;
+  if (PALETTE[row].shape >= 0) g_shape = PALETTE[row].shape;
+  if (g_tool == TOOL_SELECT)
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Select: click an object to pick it, drag it to move it");
+  else if (g_tool == TOOL_CONN)
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Link: click the first object, then click the second");
+  else if (g_tool == TOOL_TEXT)
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "Text: click where the label should start");
+  else if (g_tool == TOOL_ERASE)   /* checked before the shape case below */
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Eraser: drag to rub out loose characters, click an object to remove it");
+  else
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "%s: click on the canvas to place one (drag to size it), or press Enter",
+             dgm_shape_name(g_shape));
+}
+
+/* The shape pane: one row per entry, its digit, its name and a small preview,
+   with the active row highlighted. */
+static void draw_palette(void)
+{
+  int x0 = g_dview->x, y0 = g_dview->y, i, x;
+  int h = g_dview->height - 1;
+
+  for (i = 0; i < h; i++)
+    for (x = 0; x < PALETTE_W; x++)
+      put(x0 + x, y0 + i, ' ', CACA_WHITE, CACA_BLUE);
+
+  put_str_clipped(x0 + 1, y0, "Shapes", PALETTE_W - 2, CACA_YELLOW, CACA_BLUE);
+  for (x = 0; x < PALETTE_W - 2; x++) put(x0 + 1 + x, y0 + 1, '-', CACA_WHITE, CACA_BLUE);
+
+  for (i = 0; i < PALETTE_N && 2 + i < h; i++) {
+    int active = (i == g_pal_sel);
+    uint8_t fg = active ? CACA_BLACK : CACA_WHITE;
+    uint8_t bg = active ? CACA_CYAN  : CACA_BLUE;
+    char row[PALETTE_W + 8];
+    const char *sample = PALETTE[i].shape >= 0 ? dgm_shape_sample(PALETTE[i].shape, g_doc->style)
+                       : PALETTE[i].tool == TOOL_CONN  ? "-->"
+                       : PALETTE[i].tool == TOOL_TEXT  ? "abc"
+                       : PALETTE[i].tool == TOOL_ERASE ? "[x]" : "[ ]";
+    for (x = 0; x < PALETTE_W; x++) put(x0 + x, y0 + 2 + i, ' ', fg, bg);
+    snprintf(row, sizeof row, "%c %-9s%s", PALETTE[i].key, PALETTE[i].name, sample);
+    put_str_clipped(x0 + 1, y0 + 2 + i, row, PALETTE_W - 2, fg, bg);
+  }
+
+  if (2 + PALETTE_N + 2 < h) {
+    put_str_clipped(x0 + 1, y0 + PALETTE_N + 3, "click or drag one",
+                    PALETTE_W - 2, CACA_LIGHTGRAY, CACA_BLUE);
+    put_str_clipped(x0 + 1, y0 + PALETTE_N + 4, "onto the canvas",
+                    PALETTE_W - 2, CACA_LIGHTGRAY, CACA_BLUE);
+    put_str_clipped(x0 + 1, y0 + PALETTE_N + 6, "p  hide this pane",
+                    PALETTE_W - 2, CACA_LIGHTGRAY, CACA_BLUE);
+    put_str_clipped(x0 + 1, y0 + PALETTE_N + 7, "?  all the keys",
+                    PALETTE_W - 2, CACA_LIGHTGRAY, CACA_BLUE);
+  }
+}
+
+/* The outline a shape would have if dropped right now, so a drag from the
+   palette shows what is coming before the button is released. */
+static void draw_ghost(int shape, int x, int y, int w, int h)
+{
+  int i, j;
+  for (j = 0; j < h; j++)
+    for (i = 0; i < w; i++) {
+      int edge = (i == 0 || i == w - 1 || j == 0 || j == h - 1);
+      if (!edge || !on_canvas(scr_x(x + i), scr_y(y + j))) continue;
+      put(scr_x(x + i), scr_y(y + j), shape == DGM_ACTOR ? 'O' : '.',
+          CACA_BLACK, CACA_YELLOW);
+    }
+}
+
+static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
+{
+  int x, y, vw = view_w(), vh = view_h();
+  (void)w; (void)ud;
+
+  dgm_render(g_doc, &g_grid);
+
+  for (y = 0; y < vh; y++)
+    for (x = 0; x < vw; x++) {
+      int cx = g_vx + x, cy = g_vy + y;
+      uint32_t ch = grid_at(cx, cy);
+      put(view_x0() + x, g_dview->y + y, ch ? ch : ' ', CACA_LIGHTGRAY, CACA_BLACK);
+    }
+
+  /* The selection, repainted on top in colour: a box gets its border and its
+     resize corner marked, a connector its whole route. */
+  if (g_sel >= 0 && g_sel < g_doc->n) {
+    const dgm_shape_t *s = &g_doc->s[g_sel];
+    if (s->kind == DGM_CONN) {
+      int px[4], py[4], n = dgm_route(g_doc, g_sel, px, py, 4), k;
+      for (k = 0; k + 1 < n; k++) {
+        int cx = px[k], cy = py[k];
+        int sx = (px[k + 1] > cx) - (px[k + 1] < cx), sy = (py[k + 1] > cy) - (py[k + 1] < cy);
+        for (;;) {
+          if (on_canvas(scr_x(cx), scr_y(cy)))
+            put(scr_x(cx), scr_y(cy), grid_at(cx, cy), CACA_BLACK, CACA_CYAN);
+          if (cx == px[k + 1] && cy == py[k + 1]) break;
+          cx += sx; cy += sy;
+        }
+      }
+    } else {
+      for (y = s->y; y < s->y + s->h; y++)
+        for (x = s->x; x < s->x + s->w; x++) {
+          int edge = (x == s->x || x == s->x + s->w - 1 || y == s->y || y == s->y + s->h - 1);
+          if (s->kind == DGM_NODE && !edge) continue;
+          if (!on_canvas(scr_x(x), scr_y(y))) continue;
+          put(scr_x(x), scr_y(y), grid_at(x, y), CACA_BLACK, CACA_CYAN);
+        }
+      /* The four link handles, then the resize corner on top of one of them:
+         a selected object shows where to drag from, so linking and resizing
+         stop being things you have to be told about. */
+      if (s->kind == DGM_NODE) {
+        int hx[4], hy[4], k;
+        hx[0] = s->x + s->w / 2;  hy[0] = s->y;                 /* top    */
+        hx[1] = s->x + s->w / 2;  hy[1] = s->y + s->h - 1;      /* bottom */
+        hx[2] = s->x;             hy[2] = s->y + s->h / 2;      /* left   */
+        hx[3] = s->x + s->w - 1;  hy[3] = s->y + s->h / 2;      /* right  */
+        for (k = 0; k < 4; k++)
+          if (on_canvas(scr_x(hx[k]), scr_y(hy[k])))
+            put(scr_x(hx[k]), scr_y(hy[k]), 'o', CACA_BLACK, CACA_MAGENTA);
+        if (on_canvas(scr_x(s->x + s->w - 1), scr_y(s->y + s->h - 1)))
+          put(scr_x(s->x + s->w - 1), scr_y(s->y + s->h - 1), '#', CACA_BLACK, CACA_YELLOW);
+      }
+    }
+  }
+
+  /* The keyboard cursor: where Enter would put the next shape. Only shown when
+     nothing is selected, so it never competes with the selection highlight. */
+  if (g_sel < 0 && !g_editing && on_canvas(scr_x(g_cur_x), scr_y(g_cur_y)))
+    put(scr_x(g_cur_x), scr_y(g_cur_y), grid_at(g_cur_x, g_cur_y), CACA_BLACK, CACA_WHITE);
+
+  /* Live feedback for whatever is being dragged right now. */
+  if (g_drag == DRAG_NEWSHAPE) {
+    int bx, by, bw, bh;
+    drag_rect(&bx, &by, &bw, &bh);
+    for (y = by; y < by + bh; y++)
+      for (x = bx; x < bx + bw; x++) {
+        int edge = (x == bx || x == bx + bw - 1 || y == by || y == by + bh - 1);
+        if (!edge || !on_canvas(scr_x(x), scr_y(y))) continue;
+        put(scr_x(x), scr_y(y), '.', CACA_BLACK, CACA_YELLOW);
+      }
+  } else if (g_drag == DRAG_PALETTE) {
+    int gw, gh;
+    dgm_shape_default(g_shape, &gw, &gh);
+    if (g_tool == TOOL_TEXT) { gw = 4; gh = 1; }
+    draw_ghost(g_shape, g_drag_x1 - gw / 2, g_drag_y1 - gh / 2, gw, gh);
+  } else if (g_drag == DRAG_CONNECT) {
+    int cx = g_drag_x0, cy = g_drag_y0;
+    int steps = 0;
+    while (steps++ < 4096 && (cx != g_drag_x1 || cy != g_drag_y1)) {
+      int dx = (g_drag_x1 > cx) - (g_drag_x1 < cx);
+      int dy = (g_drag_y1 > cy) - (g_drag_y1 < cy);
+      if (dx && cx != g_drag_x1) cx += dx; else if (dy) cy += dy;
+      if (on_canvas(scr_x(cx), scr_y(cy)))
+        put(scr_x(cx), scr_y(cy), '*', CACA_BLACK, CACA_YELLOW);
+    }
+  }
+
+  /* A label being typed is drawn where it will land, with a caret. */
+  if (g_editing && g_sel >= 0 && g_sel < g_doc->n) {
+    const dgm_shape_t *s = &g_doc->s[g_sel];
+    int lx = s->kind == DGM_NODE ? s->x + 1 : s->x;
+    int ly = s->kind == DGM_NODE ? s->y + s->h / 2 : s->y;
+    int maxw = s->kind == DGM_NODE ? s->w - 2 : view_w();
+    const char *shown = g_edit_buf;
+    const char *nl = strrchr(g_edit_buf, '\n');
+    if (nl) shown = nl + 1;
+    if (on_canvas(scr_x(lx), scr_y(ly))) {
+      int n = (int)strlen(shown), off = 0;
+      if (n > maxw - 1 && maxw > 1) off = n - (maxw - 1);
+      put_str_clipped(scr_x(lx), scr_y(ly), shown + off, maxw, CACA_BLACK, CACA_WHITE);
+      if (n - off < maxw)
+        put(scr_x(lx) + (n - off), scr_y(ly), '_', CACA_BLACK, CACA_WHITE);
+    }
+  }
+
+  /* Bottom row: the prompt if one is up, otherwise the key legend. */
+  {
+    int ly = g_dview->y + g_dview->height - 1;
+    char line[512];
+    for (x = 0; x < g_dview->width; x++) put(g_dview->x + x, ly, ' ', CACA_BLACK, CACA_LIGHTGRAY);
+    if (g_confirm_quit)
+      snprintf(line, sizeof line,
+               "Leave the drawing behind?  y = insert it after all   n = discard it   C-g = stay");
+    else if (g_dgm_msg[0])
+      snprintf(line, sizeof line, "%s", g_dgm_msg);
+    else if (g_editing)
+      snprintf(line, sizeof line, "Type the label:  Ret commits   C-o adds a line   C-g cancels");
+    else if (g_conn_from >= 0)
+      snprintf(line, sizeof line,
+               "Link from \"%s\": click the other object, or Tab to it and press Enter  (C-g cancels)",
+               g_doc->s[g_conn_from].label[0] ? g_doc->s[g_conn_from].label : "that object");
+    else if (g_tool == TOOL_SHAPE)
+      snprintf(line, sizeof line,
+               "%s: click to place · drag to size · Enter places at the cursor | 1 back to Select  ? help",
+               dgm_shape_name(g_shape));
+    else if (g_tool == TOOL_CONN)
+      snprintf(line, sizeof line,
+               "Link: click one object, then click the other (dragging between them works too)"
+               " | 1 back to Select   C-g cancels");
+    else if (g_tool == TOOL_TEXT)
+      snprintf(line, sizeof line, "Text: click where the label starts | 1 back to Select   ? help");
+    else if (g_tool == TOOL_ERASE)
+      snprintf(line, sizeof line,
+               "Eraser: drag rubs out loose characters one cell at a time · a click removes "
+               "the object under it | u undoes   1 back to Select");
+    else if (g_sel >= 0)
+      snprintf(line, sizeof line,
+               "Drag it to move · # corner to resize · click an o handle then the other object "
+               "to link | Ret label  r shape  Del delete  u undo  q insert  ? help");
+    else
+      snprintf(line, sizeof line,
+               "Pick a shape on the left (or press its digit), then click the canvas | "
+               "Tab select  u undo  q insert it in the buffer  ? help");
+    put_str_clipped(g_dview->x, ly, line, g_dview->width, CACA_BLACK, CACA_LIGHTGRAY);
+  }
+
+  /* An empty canvas explains itself rather than sitting there black. */
+  if (g_doc->n == 0 && !g_editing && !g_show_help) {
+    static const char *const start[] = {
+      " Start here ",
+      "",
+      " 1.  Pick a shape on the left — or press its digit",
+      " 2.  Click on the canvas to place it, then type its label",
+      " 3.  To link two: click one, press l, then click the other",
+      "     (or drag from a selected object's  o  handle onto another)",
+      "",
+      " q puts the diagram in the buffer at your cursor · ? shows every key",
+      NULL
+    };
+    int n = 0, wd = 0, i, bx, by;
+    for (i = 0; start[i]; i++) {
+      int l = (int)strlen(start[i]);
+      if (l > wd) wd = l;
+      n++;
+    }
+    wd += 2;
+    bx = view_x0() + (view_w() - wd) / 2;
+    by = g_dview->y + (view_h() - n) / 2;
+    if (bx < view_x0()) bx = view_x0();
+    if (by < g_dview->y) by = g_dview->y;
+    for (i = 0; i < n; i++) {
+      int k;
+      for (k = 0; k < wd; k++) put(bx + k, by + i, ' ', CACA_WHITE, CACA_BLUE);
+      put_str_clipped(bx + 1, by + i, start[i], wd - 2,
+                      i == 0 ? CACA_YELLOW : CACA_WHITE, CACA_BLUE);
+    }
+  }
+
+  if (g_pal) draw_palette();
+  if (g_show_help) draw_help_overlay();
+  dgm_status();
+}
+
+static void dgm_status(void)
+{
+  char buf[256];
+  const char *base = (g_cur_buf >= 0 && g_cur_buf < g_nbuf && g_buffers[g_cur_buf].has_file)
+                   ? g_buffers[g_cur_buf].path : "*scratch*";
+  const char *slash = strrchr(base, '/');
+  int nb = 0, nc = 0, nt = 0, i;
+  for (i = 0; i < g_doc->n; i++) {
+    if (g_doc->s[i].kind == DGM_NODE) nb++;
+    else if (g_doc->s[i].kind == DGM_CONN) nc++;
+    else nt++;
+  }
+  snprintf(buf, sizeof buf,
+           " %s%s  diagram  %s  %d shape%s %d link%s %d label%s  %s  %s",
+           g_modified ? "**  " : "--  ", slash ? slash + 1 : base, tool_name(),
+           nb, nb == 1 ? "" : "s", nc, nc == 1 ? "" : "s", nt, nt == 1 ? "" : "s",
+           g_doc->style == DGM_STYLE_UNICODE ? "unicode" : "ascii",
+           g_ins_end > g_ins_start ? "q replaces the selection" : "q inserts at the cursor");
+  if (g_modeline) gtcaca_statusbar_set_text(g_modeline, buf);
+}
+
+/* ── editing helpers ─────────────────────────────────────────────────────────*/
+
+static void begin_edit(int idx)
+{
+  if (idx < 0 || idx >= g_doc->n || g_doc->s[idx].kind == DGM_CONN) return;
+  g_sel = idx;
+  strncpy(g_edit_buf, g_doc->s[idx].label, sizeof g_edit_buf - 1);
+  g_edit_buf[sizeof g_edit_buf - 1] = '\0';
+  g_edit_len = (int)strlen(g_edit_buf);
+  g_editing = 1;
+  g_dgm_msg[0] = '\0';
+}
+
+static void commit_edit(int keep)
+{
+  if (!g_editing) return;
+  g_editing = 0;
+  if (!keep || g_sel < 0 || g_sel >= g_doc->n) return;
+  if (!strcmp(g_doc->s[g_sel].label, g_edit_buf)) return;   /* typed nothing new */
+  undo_push();
+  dgm_set_label(g_doc, g_sel, g_edit_buf);
+  /* An empty text object would be invisible and unselectable — drop it. */
+  if (g_doc->s[g_sel].kind == DGM_TEXT && !g_edit_buf[0]) {
+    dgm_delete(g_doc, g_sel);
+    g_sel = -1;
+  }
+  g_modified = 1;
+}
+
+/* Put the drawing into the buffer where it came from: over the region it was
+   started from, or at the cursor if there was none. The mode never writes a
+   file — the buffer is saved the ordinary way, with C-x C-s. */
+static void apply_to_buffer(void)
+{
+  size_t cap = (size_t)DGM_W * DGM_H * 4 + DGM_H + 2;
+  char *art, *text;
+  int n, at_line_start, pos;
+
+  if (!g_ed) return;
+  art = malloc(cap);
+  text = malloc(cap + 2);
+  if (!art || !text) { free(art); free(text); return; }
+
+  n = dgm_to_text(g_doc, art, cap);
+  if (n < 0) {
+    free(art); free(text);
+    snprintf(g_message, sizeof g_message, "Diagram too large to insert");
+    return;
+  }
+
+  if (g_ins_end > g_ins_start)                   /* it came from a region */
+    gtcaca_editor_delete_range(g_ed, g_ins_start, g_ins_end - g_ins_start);
+
+  /* Art is made of whole lines, so it must start on one: if the cursor sat
+     mid-line, break the line first rather than wrapping the first box around
+     whatever was already there. */
+  pos = g_ins_start;
+  at_line_start = (pos == 0) ||
+                  (pos == gtcaca_editor_position_from_line(g_ed,
+                            gtcaca_editor_line_from_position(g_ed, pos)));
+  snprintf(text, cap + 2, "%s%s", at_line_start ? "" : "\n", art);
+
+  gtcaca_editor_insert_text(g_ed, pos, text);
+  gtcaca_editor_set_empty_selection(g_ed, pos + (int)strlen(text));
+  free(art); free(text);
+}
+
+static void close_diagram(int keep)
+{
+  int inserted = keep && g_modified;
+
+  if (inserted) apply_to_buffer();
+
+  gtcaca_widget_hide(GTCACA_WIDGET(g_dview));
+  gtcaca_widget_hide(GTCACA_WIDGET(g_dw));
+  g_dview->has_focus = 0;
+  g_dw->has_focus = 0;
+  g_dgm_open = 0;
+  g_show_help = 0;
+  g_confirm_quit = 0;
+  undo_clear();
+  snprintf(g_message, sizeof g_message,
+           inserted ? "Diagram inserted — C-x C-s saves the file, C-/ undoes the insert"
+                    : g_modified ? "Left the diagram behind (nothing inserted)"
+                                 : "Left diagram mode");
+  pane_show_all();
+}
+
+/* Record one raw cell's previous value, so the stroke can be undone whole. */
+static void stroke_record(int x, int y, uint32_t was)
+{
+  if (g_nstroke >= ERASE_MAX) return;
+  g_stroke[g_nstroke].x = x;
+  g_stroke[g_nstroke].y = y;
+  g_stroke[g_nstroke].ch = was;
+  g_nstroke++;
+}
+
+/* Rub out exactly one character — never a whole object; Del does that.
+   A character inside a shape belongs to that shape rather than to the canvas,
+   so the shape is first turned back into plain characters (which changes
+   nothing on screen), and then the one cell goes. */
+static int erase_at(int x, int y)
+{
+  uint32_t was = dgm_raw_get(g_doc, x, y);
+  int owner;
+
+  if (!was || was == ' ') {
+    owner = dgm_hit(g_doc, x, y);
+    if (owner < 0) owner = dgm_hit_conn(g_doc, x, y);
+    if (owner < 0) return 0;                     /* genuinely empty cell */
+    if (!g_stroke_shapes) {                      /* remember the objects, once */
+      g_stroke_shapes = malloc((size_t)(g_doc->n ? g_doc->n : 1) * sizeof *g_stroke_shapes);
+      if (g_stroke_shapes) {
+        memcpy(g_stroke_shapes, g_doc->s, (size_t)g_doc->n * sizeof *g_doc->s);
+        g_stroke_nshapes = g_doc->n;
+      }
+    }
+    {
+      dgm_cell_t made[ERASE_MAX];
+      int nmade = 0, i;
+      const char *what = g_doc->s[owner].kind == DGM_CONN ? "link"
+                       : g_doc->s[owner].kind == DGM_TEXT ? "label"
+                       : dgm_shape_name(g_doc->s[owner].shape);
+      if (dgm_flatten(g_doc, owner, made, ERASE_MAX, &nmade) != 0) return 0;
+      for (i = 0; i < nmade; i++) stroke_record(made[i].x, made[i].y, made[i].ch);
+      if (g_sel == owner) g_sel = -1;
+      snprintf(g_dgm_msg, sizeof g_dgm_msg,
+               "That %s is plain characters now, so it can be rubbed out (u undoes)", what);
+    }
+    was = dgm_raw_get(g_doc, x, y);
+    if (!was || was == ' ') return 0;
+  }
+
+  dgm_raw_put(g_doc, x, y, 0);
+  stroke_record(x, y, was);
+  g_modified = 1;
+  return 1;
+}
+
+/* Join two objects, or explain why nothing happened. Two objects are either
+   linked or not — asking for a link that already exists (in either direction)
+   selects it instead of stacking an invisible second one on the same route. */
+static void link_objects(int from, int to)
+{
+  int existing, c;
+
+  if (from < 0 || to < 0 || from >= g_doc->n || to >= g_doc->n) return;
+  if (from == to) {
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "An object cannot link to itself");
+    return;
+  }
+  existing = dgm_find_conn(g_doc, from, to);
+  if (existing >= 0) {
+    g_sel = existing;
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Those two are already linked — a flips the arrows, Del removes it");
+    return;
+  }
+  undo_push();
+  c = dgm_add_conn(g_doc, from, to);
+  if (c < 0) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Cannot link those two"); return; }
+  g_sel = c;
+  g_modified = 1;
+  snprintf(g_dgm_msg, sizeof g_dgm_msg, "Linked");
+}
+
+/* Cycle the selection through the objects, connectors included. */
+static void select_next(int dir)
+{
+  int n = g_doc->n, i;
+  if (n == 0) { g_sel = -1; return; }
+  i = g_sel < 0 ? (dir > 0 ? -1 : 0) : g_sel;
+  i = (i + dir + n) % n;
+  g_sel = i;
+  scroll_to_sel();
+}
+
+/* ── mouse ───────────────────────────────────────────────────────────────────*/
+
+static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
+                    int mx, int my, int button, void *ud)
+{
+  int cx, cy;
+  (void)w; (void)ud;
+  if (!g_dgm_open) return 0;
+
+  if (ev == GTCACA_MOUSE_WHEEL) {
+    g_vy += (button == 4) ? 3 : -3;
+    if (g_vy < 0) g_vy = 0;
+    if (g_vy > DGM_H - 1) g_vy = DGM_H - 1;
+    return 1;
+  }
+
+  cx = canvas_x(mx);
+  cy = canvas_y(my);
+  if (cx < 0) cx = 0;
+  if (cy < 0) cy = 0;
+  if (cx >= DGM_W) cx = DGM_W - 1;
+  if (cy >= DGM_H) cy = DGM_H - 1;
+
+  /* CCM_DGMLOG=1 traces gestures, the way CCM_EVLOG traces gtcaca's events —
+     the only practical way to see what a drag did, since the screen it draws
+     on is the thing being debugged. */
+  if (getenv("CCM_DGMLOG"))
+    fprintf(stderr, "[dgm] ev=%d mx=%d my=%d btn=%d -> canvas(%d,%d) tool=%d drag=%d sel=%d\n",
+            (int)ev, mx, my, button, canvas_x(mx), canvas_y(my), g_tool, g_drag, g_sel);
+  if (ev == GTCACA_MOUSE_PRESS) {
+    int hit, row;
+    if (g_show_help) { g_show_help = 0; return 1; }
+    if (g_editing) commit_edit(1);
+
+    row = palette_row_at(mx, my);
+    if (row >= 0) {                              /* a palette entry: click or drag it */
+      palette_pick(row);
+      g_drag_x0 = g_drag_x1 = cx;
+      g_drag_y0 = g_drag_y1 = cy;
+      if (g_tool == TOOL_SHAPE || g_tool == TOOL_TEXT) g_drag = DRAG_PALETTE;
+      return 1;
+    }
+    if (!on_canvas(mx, my)) return 1;            /* the pane edge or the hint bar */
+    g_dgm_msg[0] = '\0';
+    g_drag_x0 = g_drag_x1 = cx;
+    g_drag_y0 = g_drag_y1 = cy;
+    g_cur_x = cx; g_cur_y = cy;                  /* the keyboard cursor follows clicks */
+
+    /* Waiting for the far end of a link: this click picks it. */
+    if (g_conn_from >= 0) {
+      int target = dgm_hit(g_doc, cx, cy);
+      if (target < 0)
+        snprintf(g_dgm_msg, sizeof g_dgm_msg, "Nothing there to link to — cancelled");
+      else
+        link_objects(g_conn_from, target);
+      g_conn_from = -1;
+      return 1;
+    }
+
+    if (g_tool == TOOL_ERASE) {
+      g_nstroke = 0;
+      g_drag = DRAG_ERASE;
+      erase_at(cx, cy);
+      return 1;
+    }
+    if (g_tool == TOOL_SHAPE) { g_drag = DRAG_NEWSHAPE; return 1; }
+    if (g_tool == TOOL_TEXT) {
+      undo_push();
+      g_sel = dgm_add_text(g_doc, cx, cy, "");
+      g_modified = 1;
+      palette_pick(0);                           /* one placement, then back to Select */
+      begin_edit(g_sel);
+      return 1;
+    }
+
+    hit = dgm_hit(g_doc, cx, cy);
+    if (hit < 0) {                               /* nothing here */
+      int conn = dgm_hit_conn(g_doc, cx, cy);
+      if (conn >= 0 && g_tool == TOOL_SELECT) { g_sel = conn; return 1; }
+      g_sel = -1;
+      g_drag = DRAG_PAN;
+      return 1;
+    }
+
+    g_sel = hit;
+    if (g_tool == TOOL_CONN) {
+      /* Arm the link now: a second click finishes it, and dragging straight to
+         the other object finishes it too. Either gesture works. */
+      g_conn_from = hit;
+      g_drag = DRAG_CONNECT;
+      g_drag_shape = hit;
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Now click the object to link to");
+      return 1;
+    }
+    switch (dgm_hit_part(g_doc, hit, cx, cy)) {
+    case DGM_HIT_CORNER: g_drag = DRAG_RESIZE;  g_drag_shape = hit; undo_push(); break;
+    case DGM_HIT_BORDER: g_drag = DRAG_CONNECT; g_drag_shape = hit; break;
+    default:
+      g_drag = DRAG_MOVE; g_drag_shape = hit; undo_push();
+      g_drag_ox = cx - g_doc->s[hit].x;
+      g_drag_oy = cy - g_doc->s[hit].y;
+      break;
+    }
+    return 1;
+  }
+
+  if (ev == GTCACA_MOUSE_MOTION) {
+    int pdx = g_drag_x1 - cx, pdy = g_drag_y1 - cy;
+    g_drag_x1 = cx; g_drag_y1 = cy;
+    switch (g_drag) {
+    case DRAG_MOVE: {
+      dgm_shape_t *s = &g_doc->s[g_drag_shape];
+      dgm_place(g_doc, g_drag_shape, cx - g_drag_ox, cy - g_drag_oy, s->w, s->h);
+      g_modified = 1;
+      break;
+    }
+    case DRAG_RESIZE: {
+      dgm_shape_t *s = &g_doc->s[g_drag_shape];
+      dgm_place(g_doc, g_drag_shape, s->x, s->y, cx - s->x + 1, cy - s->y + 1);
+      g_modified = 1;
+      break;
+    }
+    case DRAG_ERASE: {
+      /* Terminals report motion in jumps, so rub out every cell between the
+         last report and this one — otherwise a quick sweep leaves gaps. */
+      int px = g_drag_x1 + pdx, py = g_drag_y1 + pdy;   /* where we were */
+      int dx = cx - px, dy = cy - py;
+      int steps = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy)
+                ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy), i;
+      if (steps > 512) steps = 512;
+      for (i = 0; i <= steps; i++)
+        erase_at(steps ? px + dx * i / steps : cx,
+                 steps ? py + dy * i / steps : cy);
+      break;
+    }
+    case DRAG_PAN:
+      g_vx += pdx; g_vy += pdy;
+      if (g_vx < 0) g_vx = 0;
+      if (g_vy < 0) g_vy = 0;
+      g_drag_x1 = canvas_x(mx); g_drag_y1 = canvas_y(my);
+      break;
+    default:
+      break;                                     /* NEWBOX / CONNECT: drawn as preview */
+    }
+    return 1;
+  }
+
+  /* release */
+  if (g_drag == DRAG_ERASE) {
+    int rubbed = 0, i;
+    g_drag = DRAG_NONE;
+    for (i = 0; i < g_nstroke; i++)              /* cells cleared, not ones flatten made */
+      if (g_stroke[i].ch) rubbed++;
+    undo_push_cells();
+    if (rubbed)
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Erased %d character%s  (u puts them back)",
+               rubbed, rubbed == 1 ? "" : "s");
+    else if (!g_dgm_msg[0])
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Nothing to erase there");
+    return 1;
+  }
+  if (g_drag == DRAG_NEWSHAPE) {
+    int bx, by, bw, bh, dw, dh;
+    g_drag_x1 = cx; g_drag_y1 = cy;
+    drag_rect(&bx, &by, &bw, &bh);
+    dgm_shape_default(g_shape, &dw, &dh);
+    /* A click (no real drag) places the shape at its natural size — that is the
+       friendly reading of "click here", and dragging still sizes it. */
+    if (bw < 3 && bh < 3) { bw = dw; bh = dh; }
+    undo_push();
+    g_sel = dgm_add_node(g_doc, g_shape, bx, by, bw, bh, "");
+    g_modified = 1;
+    g_drag = DRAG_NONE;
+    palette_pick(0);                             /* one placement, then back to Select */
+    if (g_sel >= 0) begin_edit(g_sel);
+    return 1;
+  }
+  if (g_drag == DRAG_PALETTE) {
+    g_drag = DRAG_NONE;
+    if (on_canvas(mx, my)) {                     /* dropped onto the canvas */
+      int dw, dh;
+      undo_push();
+      if (g_tool == TOOL_TEXT) {
+        g_sel = dgm_add_text(g_doc, cx, cy, "");
+      } else {
+        dgm_shape_default(g_shape, &dw, &dh);
+        g_sel = dgm_add_node(g_doc, g_shape, cx - dw / 2, cy - dh / 2, dw, dh, "");
+      }
+      g_modified = 1;
+      palette_pick(0);
+      if (g_sel >= 0) begin_edit(g_sel);
+    }
+    return 1;
+  }
+  if (g_drag == DRAG_CONNECT) {
+    int target = dgm_hit(g_doc, cx, cy);
+    int was_click = (cx == g_drag_x0 && cy == g_drag_y0);
+    g_drag = DRAG_NONE;
+    if (target >= 0 && target != g_drag_shape) {
+      link_objects(g_drag_shape, target);
+      g_conn_from = -1;
+    } else if (was_click) {
+      /* Not a drag but a click on the source: stay armed and wait for the
+         second click, which is the easier gesture in a terminal. */
+      g_conn_from = g_drag_shape;
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Now click the object to link to  (C-g cancels)");
+    } else {
+      g_conn_from = -1;
+      snprintf(g_dgm_msg, sizeof g_dgm_msg,
+               "Let go on top of another object to link the two");
+    }
+    return 1;
+  }
+  g_drag = DRAG_NONE;
+  return 1;
+}
+
+/* ── keys ────────────────────────────────────────────────────────────────────*/
+
+/* Typing into the label editor or a prompt. Returns 1 if the key was eaten. */
+static int typing_key(int key)
+{
+  char  *buf = g_edit_buf;
+  int   *len = &g_edit_len;
+  size_t cap = sizeof g_edit_buf;
+
+  switch (key) {
+  case CACA_KEY_RETURN:
+  case 10:
+    commit_edit(1);
+    return 1;
+  case CACA_KEY_ESCAPE:
+  case 7:                                        /* C-g */
+    commit_edit(0);
+    return 1;
+  case CACA_KEY_BACKSPACE:
+  case CACA_KEY_DELETE:
+    while (*len > 0 && ((unsigned char)buf[*len - 1] & 0xc0) == 0x80) buf[--(*len)] = '\0';
+    if (*len > 0) buf[--(*len)] = '\0';
+    return 1;
+  case 15:                                       /* C-o: a second label line */
+    if ((size_t)*len + 2 < cap) { buf[(*len)++] = '\n'; buf[*len] = '\0'; }
+    return 1;
+  default:
+    break;
+  }
+  if (GTCACA_KEY_IS_UNICODE(key)) {              /* accented input */
+    char utf[8];
+    int n = key_to_utf8(key, utf), i;
+    if (n > 0 && (size_t)(*len + n + 1) < cap)
+      for (i = 0; i < n; i++) { buf[(*len)++] = utf[i]; buf[*len] = '\0'; }
+    return 1;
+  }
+  if (key >= 32 && key < 127 && (size_t)*len + 2 < cap) {
+    buf[(*len)++] = (char)key;
+    buf[*len] = '\0';
+    return 1;
+  }
+  return 1;                                      /* swallow everything while typing */
+}
+
+static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
+{
+  (void)w; (void)ud;
+  if (!g_dgm_open) return 0;
+
+  if (g_editing) return typing_key(key);
+
+  if (g_confirm_quit) {
+    switch (key) {
+    case 'y': case 'Y': g_confirm_quit = 0; close_diagram(1); return 1;
+    case 'n': case 'N': g_confirm_quit = 0; close_diagram(0); return 1;
+    default:            g_confirm_quit = 0; g_dgm_msg[0] = '\0'; return 1;
+    }
+  }
+
+  if (g_show_help && key != '?') { g_show_help = 0; return 1; }
+
+  switch (key) {
+  case 'q': case 3:                              /* q / C-c: put it in the buffer */
+    close_diagram(1);
+    return 1;
+  case 'Q':                                      /* leave the drawing behind */
+    if (g_modified) { g_confirm_quit = 1; return 1; }
+    close_diagram(0);
+    return 1;
+  case CACA_KEY_ESCAPE:
+  case 7:                                        /* C-g — the universal "never mind" */
+    if (g_drag != DRAG_NONE) { g_drag = DRAG_NONE; return 1; }
+    if (g_conn_from >= 0) {
+      g_conn_from = -1;
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Link cancelled");
+      return 1;
+    }
+    if (g_tool != TOOL_SELECT) { palette_pick(0); return 1; }
+    g_sel = -1;
+    g_dgm_msg[0] = '\0';
+    return 1;
+  case '?': g_show_help = !g_show_help; return 1;
+  case 'p':
+    g_pal = !g_pal;
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             g_pal ? "Shape pane shown" : "Shape pane hidden — p brings it back");
+    return 1;
+
+  case 'e': palette_pick(12); return 1;          /* the eraser */
+  case 'v': palette_pick(0); return 1;
+  case 'b': palette_pick(1); return 1;           /* the plain box, the common case */
+  case 't': palette_pick(10); return 1;
+  case 'c': case 'l':
+    /* With something selected, linking is a two-step you can do from the
+       keyboard: press c, then Tab to the other object and press Enter. */
+    if (g_sel >= 0 && g_doc->s[g_sel].kind != DGM_CONN) {
+      g_conn_from = g_sel;
+      snprintf(g_dgm_msg, sizeof g_dgm_msg,
+               "Link: click the other object, or Tab to it and press Enter");
+    } else palette_pick(11);
+    return 1;
+
+  case '0': case '1': case '2': case '3': case '4':
+  case '5': case '6': case '7': case '8': case '9': {
+    int i;
+    for (i = 0; i < PALETTE_N; i++)
+      if (PALETTE[i].key == key) { palette_pick(i); break; }
+    return 1;
+  }
+
+  case CACA_KEY_TAB: select_next(1);  return 1;
+  case CACA_KEY_BACKSPACE:
+  case CACA_KEY_DELETE: case 'd':
+    if (g_sel >= 0) { undo_push(); dgm_delete(g_doc, g_sel); g_sel = -1; g_modified = 1; }
+    return 1;
+  case 'D':
+    if (g_sel >= 0) {
+      int c;
+      undo_push();
+      c = dgm_duplicate(g_doc, g_sel);
+      if (c >= 0) { g_sel = c; g_modified = 1; scroll_to_sel(); }
+    }
+    return 1;
+  case CACA_KEY_RETURN: case 10:
+    if (g_conn_from >= 0) {                      /* the far end of a keyboard link */
+      if (g_sel >= 0 && g_sel != g_conn_from) link_objects(g_conn_from, g_sel);
+      else snprintf(g_dgm_msg, sizeof g_dgm_msg, "Tab to the object to link to first");
+      g_conn_from = -1;
+      return 1;
+    }
+    if (g_tool == TOOL_SHAPE || g_tool == TOOL_TEXT || g_sel < 0) {
+      int dw, dh;                                /* place the armed shape at the cursor */
+      undo_push();
+      if (g_tool == TOOL_TEXT) g_sel = dgm_add_text(g_doc, g_cur_x, g_cur_y, "");
+      else {
+        dgm_shape_default(g_shape, &dw, &dh);
+        g_sel = dgm_add_node(g_doc, g_shape, g_cur_x, g_cur_y, dw, dh, "");
+      }
+      g_modified = 1;
+      palette_pick(0);
+      if (g_sel >= 0) begin_edit(g_sel);
+      return 1;
+    }
+    if (g_doc->s[g_sel].kind != DGM_CONN) begin_edit(g_sel);
+    return 1;
+  case CACA_KEY_INSERT: {                        /* same, but never edits a label */
+    int dw, dh;
+    undo_push();
+    dgm_shape_default(g_shape, &dw, &dh);
+    g_sel = dgm_add_node(g_doc, g_shape, g_cur_x, g_cur_y, dw, dh, "");
+    g_modified = 1;
+    if (g_sel >= 0) begin_edit(g_sel);
+    return 1;
+  }
+  case 'u': undo_pop(); return 1;
+  case 'x':                                      /* an object → plain characters */
+    if (g_sel >= 0 && g_doc->s[g_sel].kind != DGM_CONN) {
+      const char *what = g_doc->s[g_sel].kind == DGM_TEXT ? "label"
+                       : dgm_shape_name(g_doc->s[g_sel].shape);
+      undo_push();
+      if (dgm_flatten(g_doc, g_sel, NULL, 0, NULL) == 0) {
+        g_sel = -1;
+        g_modified = 1;
+        snprintf(g_dgm_msg, sizeof g_dgm_msg,
+                 "That %s is plain characters now — the eraser can rub bits out (u undoes)", what);
+      }
+    } else snprintf(g_dgm_msg, sizeof g_dgm_msg,
+                    "Select a shape or label first: x turns it into plain characters");
+    return 1;
+
+  case 'a':
+    if (g_sel >= 0 && g_doc->s[g_sel].kind == DGM_CONN) {
+      dgm_shape_t *s = &g_doc->s[g_sel];
+      undo_push();
+      /* to → both → from → none → to */
+      if (s->arrow_to && !s->arrow_from)      s->arrow_from = 1;
+      else if (s->arrow_to && s->arrow_from)  s->arrow_to = 0;
+      else if (s->arrow_from)                 s->arrow_from = 0;
+      else                                    s->arrow_to = 1;
+      g_modified = 1;
+    } else snprintf(g_dgm_msg, sizeof g_dgm_msg, "Select a link first (click its line)");
+    return 1;
+  case 'r':                                      /* redraw the selection as another shape */
+    if (g_sel >= 0 && g_doc->s[g_sel].kind == DGM_NODE) {
+      int next = (g_doc->s[g_sel].shape + 1) % DGM_NSHAPES;
+      undo_push();
+      dgm_set_shape(g_doc, g_sel, next);
+      g_modified = 1;
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Now a %s", dgm_shape_name(next));
+    } else snprintf(g_dgm_msg, sizeof g_dgm_msg, "Select an object first, then r changes its shape");
+    return 1;
+  case 's':
+    g_doc->style = g_doc->style == DGM_STYLE_ASCII ? DGM_STYLE_UNICODE : DGM_STYLE_ASCII;
+    g_modified = 1;
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "%s style",
+             g_doc->style == DGM_STYLE_UNICODE ? "Unicode" : "ASCII");
+    return 1;
+
+  case KEY_CTRL_S:                               /* the buffer is saved the usual way */
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "q puts the diagram in the buffer — then C-x C-s saves the file as usual");
+    return 1;
+
+  case '<': case ',':
+    if (g_sel >= 0) { undo_push(); dgm_resize(g_doc, g_sel, -1, 0); g_modified = 1; }
+    return 1;
+  case '>': case '.':
+    if (g_sel >= 0) { undo_push(); dgm_resize(g_doc, g_sel, 1, 0); g_modified = 1; }
+    return 1;
+  case '[':
+    if (g_sel >= 0) { undo_push(); dgm_resize(g_doc, g_sel, 0, -1); g_modified = 1; }
+    return 1;
+  case ']':
+    if (g_sel >= 0) { undo_push(); dgm_resize(g_doc, g_sel, 0, 1); g_modified = 1; }
+    return 1;
+
+  case CACA_KEY_LEFT: case CACA_KEY_RIGHT: case CACA_KEY_UP: case CACA_KEY_DOWN: {
+    int dx = (key == CACA_KEY_RIGHT) - (key == CACA_KEY_LEFT);
+    int dy = (key == CACA_KEY_DOWN)  - (key == CACA_KEY_UP);
+    if (g_sel >= 0 && g_doc->s[g_sel].kind != DGM_CONN) {
+      undo_push();
+      dgm_move(g_doc, g_sel, dx, dy);
+      g_modified = 1;
+      scroll_to_sel();
+    } else {                                     /* drive the keyboard cursor instead */
+      g_cur_x += dx; g_cur_y += dy;
+      if (g_cur_x < 0) g_cur_x = 0;
+      if (g_cur_y < 0) g_cur_y = 0;
+      if (g_cur_x >= DGM_W) g_cur_x = DGM_W - 1;
+      if (g_cur_y >= DGM_H) g_cur_y = DGM_H - 1;
+      scroll_to(g_cur_x, g_cur_y);
+    }
+    return 1;
+  }
+  case CACA_KEY_HOME: g_vx = g_vy = 0; return 1;
+  default:
+    break;
+  }
+  return 1;                                      /* the canvas owns every key */
+}
+
+/* ── entry point ─────────────────────────────────────────────────────────────*/
+
+/* Can the terminal show box-drawing glyphs? The only real constraint is a
+   UTF-8 locale: ─ │ ╭ ╮ have been in terminal fonts for decades, unlike the
+   fractional-block glyphs gtcaca_terminal_supports_blocks() gates on, so that
+   check is too strict here — it would leave a "rounded" box drawn as `.--.`
+   on a perfectly capable terminal. `s` overrides either way. */
+static int locale_is_utf8(void)
+{
+  const char *loc = getenv("LC_ALL");
+  if (!loc || !*loc) loc = getenv("LC_CTYPE");
+  if (!loc || !*loc) loc = getenv("LANG");
+  if (!loc) return 0;
+  return strstr(loc, "UTF-8") || strstr(loc, "utf-8") ||
+         strstr(loc, "UTF8")  || strstr(loc, "utf8") ? 1 : 0;
+}
+
+/* Does this text fit on the canvas, in both directions? Columns count
+   codepoints, matching how the parser lays bytes out in cells. */
+static int text_fits(const char *text)
+{
+  int col = 0, row = 0;
+  const char *p;
+  for (p = text; *p; p++) {
+    if (*p == '\n') { row++; col = 0; if (row >= DGM_H) return 0; continue; }
+    if (*p == '\r') continue;
+    if (*p == '\t') { col = (col + 8) & ~7; }
+    else if (((unsigned char)*p & 0xc0) != 0x80) col++;
+    if (col >= DGM_W) return 0;
+  }
+  return 1;
+}
+
+static int build_widgets(void)
+{
+  int cw = caca_get_canvas_width(gmo.cv);
+  int ch = caca_get_canvas_height(gmo.cv);
+
+  if (g_dw) return 0;
+  g_dw = gtcaca_window_new(NULL, "Diagram", 0, 0, cw, ch - 1);
+  if (!g_dw) return -1;
+  g_dview = gtcaca_custom_new(GTCACA_WIDGET(g_dw), 0, 0, 1, 1);
+  if (!g_dview) return -1;
+  gtcaca_custom_set_draw_cb(g_dview, draw_cb, NULL);
+  gtcaca_custom_set_key_cb(g_dview, key_cb, NULL);
+  gtcaca_custom_set_mouse_cb(g_dview, mouse_cb, NULL);
+  { gtcaca_box_t *b = gtcaca_vbox_new();
+    gtcaca_box_set_margin(b, 0);
+    gtcaca_box_add_expand(b, GTCACA_WIDGET(g_dview));
+    gtcaca_box_apply(b, g_dw->x, g_dw->y, g_dw->width, g_dw->height);
+    gtcaca_box_free(b); }
+  gtcaca_widget_hide(GTCACA_WIDGET(g_dview));
+  gtcaca_widget_hide(GTCACA_WIDGET(g_dw));
+  return 0;
+}
+
+void run_diagram(void)
+{
+  char *text = NULL;
+  int i;
+
+  if (g_dgm_open) return;
+  if (!g_doc) {
+    g_doc = dgm_new();
+    g_grid.w = DGM_W; g_grid.h = DGM_H;
+    g_grid.cell = malloc((size_t)g_grid.w * g_grid.h * sizeof *g_grid.cell);
+    if (!g_doc || !g_grid.cell) {
+      snprintf(g_message, sizeof g_message, "Diagram: out of memory");
+      return;
+    }
+  }
+  if (build_widgets() != 0) {
+    snprintf(g_message, sizeof g_message, "Diagram: cannot create the canvas");
+    return;
+  }
+
+  /* Where the drawing will land, and what it starts from. A selection is taken
+     as an existing diagram to edit — mark it with C-Space, then M-x diagram —
+     and is replaced when the mode closes. With no selection the canvas starts
+     empty and the drawing is inserted at the cursor, leaving the rest of the
+     buffer alone. */
+  dgm_clear(g_doc);
+  g_ins_start = g_ins_end = 0;
+  if (g_ed) {
+    int sel_start = gtcaca_editor_get_selection_start(g_ed);
+    int sel_end   = gtcaca_editor_get_selection_end(g_ed);
+    g_ins_start = g_ins_end = gtcaca_editor_get_current_pos(g_ed);
+    if (sel_end > sel_start) {
+      int len = sel_end - sel_start;
+      if ((size_t)len >= (size_t)DGM_W * DGM_H * 4) {
+        snprintf(g_message, sizeof g_message,
+                 "Selection is larger than the %dx%d diagram canvas", DGM_W, DGM_H);
+        return;
+      }
+      text = malloc((size_t)len + 1);
+      if (text) {
+        gtcaca_editor_get_text_range(g_ed, sel_start, sel_end, text, len + 1);
+        /* Anything past the canvas would be dropped on the way in and lost on
+           the way out, so decline instead. */
+        if (!text_fits(text)) {
+          snprintf(g_message, sizeof g_message,
+                   "Selection is larger than the %dx%d diagram canvas", DGM_W, DGM_H);
+          free(text);
+          return;
+        }
+        dgm_parse_text(g_doc, text);
+        free(text);
+        g_ins_start = sel_start;
+        g_ins_end   = sel_end;
+      }
+    }
+  }
+  g_mark_active = 0;
+
+  /* A fresh diagram draws with box-drawing glyphs where the terminal can show
+     them — that is what makes a "rounded" box actually look rounded. Art read
+     from a file keeps whatever it was drawn with, and `s` flips between the
+     two at any time. */
+  if (g_doc->n == 0 && !g_doc->has_raw)
+    g_doc->style = locale_is_utf8() ? DGM_STYLE_UNICODE : DGM_STYLE_ASCII;
+
+  g_sel = -1;
+  g_tool = TOOL_SELECT;
+  g_pal_sel = 0;
+  g_shape = DGM_RECT;
+  g_conn_from = -1;
+  g_cur_x = g_cur_y = 2;
+  g_vx = g_vy = 0;
+  g_drag = DRAG_NONE;
+  g_editing = g_confirm_quit = g_show_help = 0;
+  g_modified = 0;
+  undo_clear();
+  if (g_doc->n)
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Editing the %d object%s in your selection — q puts them back when you are done",
+             g_doc->n, g_doc->n == 1 ? "" : "s");
+  else
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Empty canvas — draw, then q drops it into the buffer at your cursor (? for help)");
+
+  pane_hide_all();
+  for (i = 0; i < g_nbuf; i++) if (g_buffers[i].ed) g_buffers[i].ed->has_focus = 0;
+  for (i = 0; i < MAXLEAVES; i++) if (g_winpool[i]) g_winpool[i]->has_focus = 0;
+  if (g_browser_win) g_browser_win->has_focus = 0;
+  if (g_browser_ed)  g_browser_ed->has_focus = 0;
+  if (g_help_win)    g_help_win->has_focus = 0;
+  if (g_help_ed)     g_help_ed->has_focus = 0;
+
+  gtcaca_widget_show(GTCACA_WIDGET(g_dw));
+  gtcaca_widget_show(GTCACA_WIDGET(g_dview));
+  widget_to_front(GTCACA_WIDGET(g_dw));
+  widget_to_front(GTCACA_WIDGET(g_dview));
+  g_dw->has_focus = 1;
+  g_dw->focused_child = GTCACA_WIDGET(g_dview);
+  g_dview->has_focus = 1;
+  g_dgm_open = 1;
+  dgm_status();
+}

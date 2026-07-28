@@ -135,6 +135,9 @@ const char *help_text(void)
   "         C-x C-l line wrap (on by default)   C-x w whitespace   C-l recenter\n"
   "Pretty   C-x p pretty-print JSON/XML (auto: selection / buffer / line)\n"
   "         M-x json-pretty-print · xml-pretty-print (current line)\n"
+  "Diagram  M-x diagram  draw an ASCII diagram and drop it in at the cursor\n"
+  "         (select existing art first to edit it; q inserts, then C-x C-s)\n"
+  "         shapes, links, an eraser — ? inside the mode lists every key\n"
   "Undo     C-/   (also C-x u)        Help   M-x help\n";
 }
 
