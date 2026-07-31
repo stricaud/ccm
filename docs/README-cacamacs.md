@@ -253,7 +253,7 @@ demand for whatever is selected.
 | drag anywhere on an object | move it |
 | drag its `#` bottom-right corner | resize it |
 | drag an `o` edge handle onto another object | link the two |
-| double-click an object | type its label, centred inside it |
+| double-click an object | type its label, centred inside it (the toolkit times the click; `gtcaca_set_double_click_time()` tunes it) |
 | click a link or a line | select it |
 | drag empty space | pan the canvas |
 | wheel | scroll |

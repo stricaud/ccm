@@ -15,8 +15,6 @@
 #include <string.h>
 #include <ctype.h>
 
-#include <sys/time.h>
-
 #include <caca.h>
 #include <gtcaca/main.h>
 #include <gtcaca/window.h>
@@ -94,9 +92,6 @@ static int  g_prompt;                           /* the one-line "export to:" que
 static char g_prompt_label[48];
 static char g_prompt_buf[PATH_MAX];
 static int  g_prompt_len;
-static long g_last_click_ms;                    /* for spotting a double-click */
-static int  g_last_click_obj = -1;
-static int  g_last_click_x, g_last_click_y;
 static int  g_vx, g_vy;                         /* top-left canvas cell on screen */
 static int  g_modified;
 static int  g_ins_start, g_ins_end;             /* buffer range the drawing replaces */
@@ -832,14 +827,6 @@ static void close_diagram(int keep)
 }
 
 /* Record one raw cell's previous value, so the stroke can be undone whole. */
-/* Milliseconds on a wall clock, for spotting a double-click. */
-static long now_ms(void)
-{
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  return (long)tv.tv_sec * 1000L + tv.tv_usec / 1000;
-}
-
 static void stroke_record(int x, int y, uint32_t was)
 {
   if (g_nstroke >= ERASE_MAX) return;
@@ -1097,27 +1084,6 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     }
 
     hit = dgm_hit(g_doc, cx, cy);
-    {   /* Double-click — the same object, the same cell, in quick succession.
-           Any of those missing is an ordinary click: selecting a shape and then
-           grabbing its corner must stay a resize, not turn into a rename. */
-      long t = now_ms();
-      int again = (hit >= 0 && hit == g_last_click_obj &&
-                   cx == g_last_click_x && cy == g_last_click_y &&
-                   t - g_last_click_ms < 500);
-      g_last_click_obj = hit;
-      g_last_click_x = cx;
-      g_last_click_y = cy;
-      g_last_click_ms = t;
-      if (again && g_tool == TOOL_SELECT) {
-        if (g_doc->s[hit].kind == DGM_CONN || g_doc->s[hit].kind == DGM_LINE)
-          snprintf(g_dgm_msg, sizeof g_dgm_msg, "A line carries no text — put a label beside it (t)");
-        else {
-          g_sel = hit;
-          begin_edit(hit);
-        }
-        return 1;
-      }
-    }
     if (hit < 0) {                               /* nothing here */
       int conn = dgm_hit_conn(g_doc, cx, cy);
       if (conn >= 0 && g_tool == TOOL_SELECT) { g_sel = conn; return 1; }
@@ -1156,6 +1122,21 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       g_drag_oy = cy - g_doc->s[hit].y;
       break;
     }
+    return 1;
+  }
+
+  if (ev == GTCACA_MOUSE_DOUBLE) {
+    /* The toolkit spotted a second click on the same cell. It comes after the
+       press that started a move, so call that off and edit the label instead. */
+    int hit = dgm_hit(g_doc, cx, cy);
+    g_drag = DRAG_NONE;
+    if (hit < 0 || g_tool != TOOL_SELECT) return 1;
+    if (g_doc->s[hit].kind == DGM_CONN || g_doc->s[hit].kind == DGM_LINE) {
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "A line carries no text — put a label beside it (t)");
+      return 1;
+    }
+    g_sel = hit;
+    begin_edit(hit);
     return 1;
   }
 
@@ -1372,7 +1353,6 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
   if (!g_dgm_open) return 0;
 
   if (g_editing || g_prompt) return typing_key(key);
-  g_last_click_obj = -1;      /* a keystroke ends any double-click in progress */
 
   if (g_confirm_quit) {
     switch (key) {
