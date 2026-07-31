@@ -1,7 +1,34 @@
 #include "cacamacs.h"
+#include "diagram.h"
 /* ── keyboard macros & numeric prefix ──────────────────────────────────────── */
 
- int on_key(gtcaca_editor_widget_t *ed, int key, void *ud);
+ /* A pasted block, handed over whole by the toolkit rather than as thousands of
+   keystrokes. Inserting it in one go is the difference between a paste that is
+   instant and one that is quadratic — and it means C-/ undoes the paste as a
+   single edit. Prompts and searches still take it a character at a time; they
+   are tiny, and they need their own handling. */
+void ccm_paste(const char *text, int len, void *ud)
+{
+  int pos, i;
+  (void)ud;
+  if (diagram_paste(text, len)) return;
+  if (g_mb_active || g_isearch || g_qr_active || g_spell_active) {
+    for (i = 0; i < len; i++) {
+      unsigned char c = (unsigned char)text[i];
+      if (c == '\n' || c == '\r') continue;       /* one line is all these accept */
+      on_key(g_ed, (int)c, NULL);
+    }
+    return;
+  }
+  if (!g_ed || len <= 0) return;
+  pos = gtcaca_editor_get_current_pos(g_ed);
+  gtcaca_editor_insert_text(g_ed, pos, text);
+  gtcaca_editor_goto_pos(g_ed, pos + len);
+  refresh_modeline(g_ed, NULL);
+  snprintf(g_message, sizeof g_message, "Pasted %d character%s", len, len == 1 ? "" : "s");
+}
+
+int on_key(gtcaca_editor_widget_t *ed, int key, void *ud);
 
 /* Encode a GTCACA_KEY_UNICODE-tagged key as UTF-8 into out[] (>= 5 bytes);
    returns the byte count, or 0 if key carries no Unicode codepoint. */
@@ -147,6 +174,7 @@ int on_key(gtcaca_editor_widget_t *ed, int key, void *ud)
     case CACA_KEY_CTRL_C:   gtcaca_main_quit();           return 1;  /* C-x C-c */
     case CACA_KEY_CTRL_X:   exchange_point_and_mark(ed);  return 1;  /* C-x C-x */
     case 'u':               gtcaca_editor_undo(ed); g_mark_active = 0; return 1; /* C-x u */
+    case KEY_UNDO:          gtcaca_editor_redo(ed); g_mark_active = 0; return 1; /* C-x C-/ redo */
     case 'l':               toggle_line_numbers(ed);      return 1;  /* C-x l */
     case 'f':               toggle_folding(ed);           return 1;  /* C-x f */
     case 't':               toggle_fold_here(ed);         return 1;  /* C-x t */

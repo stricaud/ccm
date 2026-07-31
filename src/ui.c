@@ -138,7 +138,9 @@ const char *help_text(void)
   "Diagram  M-x diagram  draw an ASCII diagram and drop it in at the cursor\n"
   "         (select existing art first to edit it; q inserts, then C-x C-s)\n"
   "         shapes, links, an eraser — ? inside the mode lists every key\n"
-  "Undo     C-/   (also C-x u)        Help   M-x help\n";
+  "Undo     C-/   (also C-x u, or M-x undo)   Redo   C-x C-/  (or M-x redo)\n"
+  "Paste    the terminal's paste goes in as one edit — C-/ takes it back whole\n"
+  "Help     M-x help\n";
 }
 
 void show_help(void)

@@ -216,6 +216,7 @@ void editor_default_key(gtcaca_editor_widget_t *ed, int key);
 void macro_execute(gtcaca_editor_widget_t *ed);
 void macro_feed(gtcaca_editor_widget_t *ed, int key);
 int on_key(gtcaca_editor_widget_t *ed, int key, void *ud);
+void ccm_paste(const char *text, int len, void *ud);
 int take_prefix(void);
 /* lang.c */
 void _cand_add(char ***arr, int *n, int *cap, const char *s, int slen);

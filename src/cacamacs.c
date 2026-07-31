@@ -290,6 +290,7 @@ int main(int argc, char **argv)
     show_browser();
   }
 
+  gtcaca_set_paste_cb(ccm_paste, NULL);   /* a paste is one edit, not 150k keys */
   ccm_theme_show_warning();   /* surface any ~/.ccm/theme mistake (last, so it sticks) */
   gtcaca_main();
 

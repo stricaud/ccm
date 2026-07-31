@@ -203,5 +203,8 @@ int dgm_export_drawio(const dgm_doc_t *d, const char *path, char *err, size_t er
 /* ── the mode (diagram.c) ──────────────────────────────────────────────────── */
 /* M-x diagram: open the current buffer's text as a diagram, full screen. */
 void run_diagram(void);
+/* Offer a pasted block to the diagram mode. Returns 1 if it took it (it only
+   wants text while a label or a prompt is being typed). */
+int  diagram_paste(const char *text, int len);
 
 #endif /* CCM_DIAGRAM_H */

@@ -179,7 +179,8 @@ void minibuffer_complete_path(void)
 }
 
 /* M-x command names offered by completion (aliases still run, see mx_done) */
-static const char *g_mx_commands[] = { "help", "diagram", "snake", "sokoban", "describe-bindings",
+static const char *g_mx_commands[] = { "help", "diagram", "undo", "redo",
+                                       "snake", "sokoban", "describe-bindings",
                                        "query-replace", "query-replace-regexp",
                                        "replace-string", "goto-line",
                                        "json-pretty-print", "xml-pretty-print", NULL };
@@ -473,6 +474,15 @@ void mx_done(const char *cmd)
     show_help();
   else if (!strcmp(cmd, "diagram") || !strcmp(cmd, "artist"))
     run_diagram();
+  else if (!strcmp(cmd, "undo")) {
+    gtcaca_editor_undo(g_ed);
+    g_mark_active = 0;
+    snprintf(g_message, sizeof g_message, "Undo   (C-/ or C-x u does the same)");
+  } else if (!strcmp(cmd, "redo")) {
+    gtcaca_editor_redo(g_ed);
+    g_mark_active = 0;
+    snprintf(g_message, sizeof g_message, "Redo   (C-x C-/ does the same)");
+  }
   else if (!strcmp(cmd, "snake"))
     run_snake();
   else if (!strcmp(cmd, "sokoban"))
@@ -490,7 +500,7 @@ void mx_done(const char *cmd)
   else if (!strcmp(cmd, "xml-pretty-print"))
     pretty_print_xml_line(g_ed);
   else if (cmd[0])
-    snprintf(g_message, sizeof g_message, "No command: %s  (try: help, diagram, json-pretty-print, xml-pretty-print)", cmd);
+    snprintf(g_message, sizeof g_message, "No command: %s  (try: help, diagram, undo, redo, json-pretty-print)", cmd);
 }
 void start_mx(void) { start_minibuffer_init("M-x ", mx_done, 2, NULL); }  /* 2 = command completion */
 

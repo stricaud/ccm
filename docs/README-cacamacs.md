@@ -23,7 +23,7 @@ Motion   C-f C-b C-n C-p  C-a C-e  C-v   arrows / Home / End / PageUp / PageDown
          M-< / M->  beginning / end of buffer
          (C-n / C-p step through wrapped rows when line wrap is on)
 Help     M-x help  (a scrollable key-binding window; q or Esc closes it)
-         M-x runs a command by name (help, diagram, goto-line, …; Tab completes)
+         M-x runs a command by name (help, diagram, undo, redo, goto-line, …; Tab completes)
 Diagram  M-x diagram  drag-and-drop ASCII diagrams (see below)
 Edit     C-d delete-fwd   C-k kill-line  Backspace   Tab indent / complete
 Words    M-f / M-b move   M-d / M-DEL kill   M-u / M-l upcase / downcase
@@ -45,7 +45,7 @@ Repeat   C-u N <command> runs the next command N times (bare C-u = 4):
          C-u 40 - draws 40 dashes, C-u 5 C-f moves five chars, …
 Meta     Esc is the Meta prefix — press Esc, then a key, for M-<key>
          (Alt+<key> works too on terminals that send it as Esc-prefixed)
-Undo     C-/   (also C-x u)
+Undo     C-/   (also C-x u, or M-x undo)   Redo  C-x C-/  (or M-x redo)
 Files    C-x C-f find file (Tab completes; a directory opens the browser)
          C-x C-s save (opens the save dialog if the buffer has no name)
          C-x C-w write to a different file (save dialog)

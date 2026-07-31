@@ -1640,6 +1640,23 @@ static int build_widgets(void)
   return 0;
 }
 
+int diagram_paste(const char *text, int len)
+{
+  int i;
+  if (!g_dgm_open) return 0;
+  if (!g_editing && !g_prompt) {                 /* nothing here takes free text */
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Nothing to paste into — press Ret on an object to type its label");
+    return 1;
+  }
+  for (i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)text[i];
+    if (c == '\n' || c == '\r') continue;        /* labels are typed a line at a time */
+    typing_key(c);
+  }
+  return 1;
+}
+
 void run_diagram(void)
 {
   char *text = NULL;
