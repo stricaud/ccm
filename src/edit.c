@@ -1,11 +1,16 @@
 #include "cacamacs.h"
 /* ── kill ring (single register) ───────────────────────────────────────────── */
 
+/* The kill ring, and the system clipboard with it: killing or copying here
+   should be pasteable in a browser, and vice versa. gtcaca picks whichever
+   clipboard the machine actually has (pbcopy, wl-copy, xclip, the Win32 API)
+   and falls back to OSC 52 so it still works over ssh. */
 void kill_set(const char *text, int len)
 {
   free(g_killbuf);
   g_killbuf = malloc((size_t)len + 1);
   if (g_killbuf) { memcpy(g_killbuf, text, (size_t)len); g_killbuf[len] = '\0'; }
+  gtcaca_clipboard_set(text, len);
 }
 
 /* ── commands ──────────────────────────────────────────────────────────────── */
@@ -256,11 +261,28 @@ void kill_line(gtcaca_editor_widget_t *ed)
   gtcaca_editor_delete_range(ed, from, to - from);
 }
 
+/* Yank what was last copied — from the system clipboard when that holds
+   something newer than our own kill ring, so copying in another application and
+   pressing C-y here does what you meant. */
 void yank(gtcaca_editor_widget_t *ed)
 {
-  if (!g_killbuf) { snprintf(g_message, sizeof(g_message), "Kill ring is empty"); return; }
-  gtcaca_editor_insert_text(ed, gtcaca_editor_get_current_pos(ed), g_killbuf);
+  char *outside = gtcaca_clipboard_get();
+  const char *text = g_killbuf;
+  int pos;
+
+  if (outside && (!g_killbuf || strcmp(outside, g_killbuf) != 0)) text = outside;
+  if (!text || !text[0]) {
+    free(outside);
+    snprintf(g_message, sizeof(g_message), "Nothing to yank");
+    return;
+  }
+  pos = gtcaca_editor_get_current_pos(ed);
+  gtcaca_editor_insert_text(ed, pos, text);
+  gtcaca_editor_goto_pos(ed, pos + (int)strlen(text));
   g_mark_active = 0;
+  if (text == outside)
+    snprintf(g_message, sizeof(g_message), "Yanked from the system clipboard");
+  free(outside);
 }
 
 void exchange_point_and_mark(gtcaca_editor_widget_t *ed)

@@ -26,6 +26,7 @@
 #include <gtcaca/editor.h>
 #include <gtcaca/box.h>
 #include <gtcaca/json.h>
+#include <gtcaca/clipboard.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096

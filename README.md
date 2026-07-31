@@ -38,6 +38,11 @@ reference and feature tour.
 > development now happens here, against gtcaca as an ordinary external
 > dependency.
 
+Copy and paste are the system's: `C-w`/`M-w` put text on the macOS, Windows or
+Linux clipboard (and on the terminal's, via OSC 52, so it works over ssh), and
+`C-y` yanks whatever another application copied. Large pastes arrive as a single
+edit rather than as thousands of keystrokes.
+
 ## Install with pip
 
 Prebuilt binaries are published to PyPI for macOS (Apple Silicon), Linux
