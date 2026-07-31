@@ -17,9 +17,10 @@ It also has a **diagram mode** (`M-x diagram`): a drag-and-drop canvas for ASCII
 diagrams. Pick a shape from the pane on the left — box, rounded, diamond,
 circle, ellipse, cloud, cylinder, hexagon, actor or free text — drop it on the
 canvas with the mouse or the keyboard, link any two by clicking one then the
-other, rub out single characters with the eraser. Leaving drops the finished
-art into your document at the cursor — plain characters, saved with `C-x C-s`
-like anything else.
+other, draw plain lines and freehand strokes, rub out single characters with the
+eraser, and colour or dash anything. Leaving drops the finished art into your
+document at the cursor — plain characters, saved with `C-x C-s` like anything
+else — and `C-w` keeps a `.drawio` copy that preserves the colours.
 
 ```
                          +-------+              .-----------.

@@ -15,18 +15,25 @@
 #include <string.h>
 #include <ctype.h>
 
+#include <sys/time.h>
+
 #include <caca.h>
 #include <gtcaca/main.h>
 #include <gtcaca/window.h>
 #include <gtcaca/custom.h>
 #include <gtcaca/box.h>
+#include <gtcaca/colordialog.h>
 
 #include "cacamacs.h"
 #include "diagram.h"
 
-enum { TOOL_SELECT = 0, TOOL_SHAPE, TOOL_TEXT, TOOL_CONN, TOOL_ERASE };
+enum { TOOL_SELECT = 0, TOOL_SHAPE, TOOL_TEXT, TOOL_CONN, TOOL_ERASE,
+       TOOL_PENCIL, TOOL_LINE };
 enum { DRAG_NONE = 0, DRAG_MOVE, DRAG_RESIZE, DRAG_CONNECT, DRAG_NEWSHAPE, DRAG_PAN,
-       DRAG_PALETTE, DRAG_ERASE };
+       DRAG_PALETTE, DRAG_ERASE, DRAG_PENCIL, DRAG_LINE, DRAG_LINE_END };
+
+/* Characters the freehand pen cycles through with Space. */
+static const char PEN_CHARS[] = "*#+.oxX@=~";
 
 #define UNDO_MAX 64
 #define PALETTE_W 20        /* columns the shape pane takes on the left */
@@ -49,6 +56,8 @@ static const palette_entry_t PALETTE[] = {
   { 't', TOOL_TEXT,   -1,           "Text"     },
   { 'l', TOOL_CONN,   -1,           "Link"     },
   { 'e', TOOL_ERASE,  -1,           "Eraser"   },
+  { 'f', TOOL_PENCIL, -1,           "Freehand" },
+  { '-', TOOL_LINE,   -1,           "Line"     },
 };
 #define PALETTE_N ((int)(sizeof PALETTE / sizeof PALETTE[0]))
 
@@ -77,6 +86,17 @@ static int  g_pal = 1;                          /* the palette pane is shown    
 static int  g_pal_sel;                          /* highlighted palette row           */
 static int  g_cur_x, g_cur_y;                   /* keyboard cursor, in canvas cells  */
 static int  g_conn_from = -1;                   /* "now pick the other end"          */
+static int  g_pen = 0;                          /* index into PEN_CHARS              */
+static int  g_new_fg = DGM_COLOR_DEFAULT;       /* style the next object gets        */
+static int  g_new_bg = DGM_COLOR_DEFAULT;
+static int  g_new_stroke = DGM_SOLID;
+static int  g_prompt;                           /* the one-line "export to:" question */
+static char g_prompt_label[48];
+static char g_prompt_buf[PATH_MAX];
+static int  g_prompt_len;
+static long g_last_click_ms;                    /* for spotting a double-click */
+static int  g_last_click_obj = -1;
+static int  g_last_click_x, g_last_click_y;
 static int  g_vx, g_vy;                         /* top-left canvas cell on screen */
 static int  g_modified;
 static int  g_ins_start, g_ins_end;             /* buffer range the drawing replaces */
@@ -271,9 +291,12 @@ static void drag_rect(int *x, int *y, int *w, int *h)
 static const char *tool_name(void)
 {
   switch (g_tool) {
-  case TOOL_SHAPE: return dgm_shape_name(g_shape);
-  case TOOL_TEXT:  return "text";
-  case TOOL_CONN:  return "link";
+  case TOOL_SHAPE:  return dgm_shape_name(g_shape);
+  case TOOL_TEXT:   return "text";
+  case TOOL_CONN:   return "link";
+  case TOOL_ERASE:  return "eraser";
+  case TOOL_PENCIL: return "freehand";
+  case TOOL_LINE:   return "line";
   default:        return "select";
   }
 }
@@ -288,17 +311,31 @@ static const char *const help_lines[] = {
   "",
   "  Shapes    1 Select   2 Box      3 Rounded   4 Diamond   5 Circle",
   "            6 Ellipse  7 Cloud    8 Cylinder  9 Hexagon   0 Actor",
-  "            t Text     l Link     e Eraser    p hides / shows the pane",
+  "            t Text     l Link     e Eraser    f Freehand   - Line",
+  "            p hides / shows the shape pane",
+  "",
+  "  Freehand  drag to draw characters yourself; Space picks the character.",
+  "  Line      drag from one end to the other — a plain line, no arrows. It is",
+  "            an object: click it, drag it, drag an end, Del removes it.",
+  "            (l links two objects instead, and keeps them joined.)",
+  "",
+  "  Style     C colour   B background   S solid / dashed / dotted",
+  "            With something selected these restyle it; with nothing selected",
+  "            they arm the style everything you draw next will get.",
+  "            Dashes and dots are drawn with characters, so the saved ASCII",
+  "            keeps them. Colour cannot survive plain text —",
+  "            C-w writes a .drawio copy that keeps colours, shapes and all.",
   "",
   "  Eraser    drag rubs out loose characters one cell at a time; a click",
   "            removes the whole object under it.  u undoes either.",
   "            x turns the selected object into plain characters first, so",
   "            the eraser can rub out any part of it.",
   "",
-  "  Mouse     drag inside an object      move it",
-  "            drag its bottom-right (#)  resize it",
-  "            drag out from its edge     link it to another object",
-  "            click a link's line        select that link",
+  "  Mouse     drag anywhere on an object   move it",
+  "            drag its # bottom-right     resize it",
+  "            drag an o edge handle       link it to another object",
+  "            click a link or a line      select it",
+  "            double-click an object      type its label, centred in it",
   "            drag empty space           pan       wheel  scroll",
   "",
   "  Linking   click one object, then click the other (with Link armed) —",
@@ -330,6 +367,9 @@ static void draw_help_overlay(void)
     n++;
   }
   w += 4;
+  if (w > view_w()) w = view_w();
+  if (n + 2 > view_h()) n = view_h() - 2;        /* a short terminal gets what fits */
+  if (n < 1) return;
   x = view_x0() + (view_w() - w) / 2;
   y = g_dview->y + (view_h() - (n + 2)) / 2;
   if (x < view_x0()) x = view_x0();
@@ -360,11 +400,26 @@ static void palette_pick(int row)
     snprintf(g_dgm_msg, sizeof g_dgm_msg, "Text: click where the label should start");
   else if (g_tool == TOOL_ERASE)   /* checked before the shape case below */
     snprintf(g_dgm_msg, sizeof g_dgm_msg,
-             "Eraser: drag to rub out loose characters, click an object to remove it");
+             "Eraser: drag to rub out characters one cell at a time");
+  else if (g_tool == TOOL_PENCIL)
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Freehand: drag to draw with '%c' — Space picks another character",
+             PEN_CHARS[g_pen]);
+  else if (g_tool == TOOL_LINE)
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Line: drag from one end to the other — a plain line, no arrows");
   else
     snprintf(g_dgm_msg, sizeof g_dgm_msg,
              "%s: click on the canvas to place one (drag to size it), or press Enter",
              dgm_shape_name(g_shape));
+}
+
+/* The pen's current character, for the palette row. */
+static const char *pen_sample(void)
+{
+  static char buf[8];
+  snprintf(buf, sizeof buf, "%c %c %c", PEN_CHARS[g_pen], PEN_CHARS[g_pen], PEN_CHARS[g_pen]);
+  return buf;
 }
 
 /* The shape pane: one row per entry, its digit, its name and a small preview,
@@ -389,7 +444,9 @@ static void draw_palette(void)
     const char *sample = PALETTE[i].shape >= 0 ? dgm_shape_sample(PALETTE[i].shape, g_doc->style)
                        : PALETTE[i].tool == TOOL_CONN  ? "-->"
                        : PALETTE[i].tool == TOOL_TEXT  ? "abc"
-                       : PALETTE[i].tool == TOOL_ERASE ? "[x]" : "[ ]";
+                       : PALETTE[i].tool == TOOL_ERASE  ? "[x]"
+                       : PALETTE[i].tool == TOOL_LINE   ? "\\ | /"
+                       : PALETTE[i].tool == TOOL_PENCIL ? pen_sample() : "[ ]";
     for (x = 0; x < PALETTE_W; x++) put(x0 + x, y0 + 2 + i, ' ', fg, bg);
     snprintf(row, sizeof row, "%c %-9s%s", PALETTE[i].key, PALETTE[i].name, sample);
     put_str_clipped(x0 + 1, y0 + 2 + i, row, PALETTE_W - 2, fg, bg);
@@ -432,7 +489,13 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
     for (x = 0; x < vw; x++) {
       int cx = g_vx + x, cy = g_vy + y;
       uint32_t ch = grid_at(cx, cy);
-      put(view_x0() + x, g_dview->y + y, ch ? ch : ' ', CACA_LIGHTGRAY, CACA_BLACK);
+      uint8_t  cfg = CACA_LIGHTGRAY, cbg = CACA_BLACK;
+      if (cx >= 0 && cy >= 0 && cx < g_grid.w && cy < g_grid.h) {
+        uint8_t f = g_grid.fg[cy * g_grid.w + cx], b = g_grid.bg[cy * g_grid.w + cx];
+        if (f != DGM_COLOR_DEFAULT) cfg = f;
+        if (b != DGM_COLOR_DEFAULT) cbg = b;
+      }
+      put(view_x0() + x, g_dview->y + y, ch ? ch : ' ', cfg, cbg);
     }
 
   /* The selection, repainted on top in colour: a box gets its border and its
@@ -451,6 +514,21 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
           cx += sx; cy += sy;
         }
       }
+    } else if (s->kind == DGM_LINE) {
+      int x0, y0, x1, y1, dx, dy, ax, ay, steps, i;
+      dgm_line_ends(s, &x0, &y0, &x1, &y1);
+      dx = x1 - x0; dy = y1 - y0;
+      ax = dx < 0 ? -dx : dx; ay = dy < 0 ? -dy : dy;
+      steps = ax > ay ? ax : ay;
+      for (i = 0; i <= steps; i++) {
+        int lx = steps ? x0 + dx * i / steps : x0, ly = steps ? y0 + dy * i / steps : y0;
+        if (on_canvas(scr_x(lx), scr_y(ly)))
+          put(scr_x(lx), scr_y(ly), grid_at(lx, ly), CACA_BLACK, CACA_CYAN);
+      }
+      if (on_canvas(scr_x(x0), scr_y(y0)))       /* the ends are the handles */
+        put(scr_x(x0), scr_y(y0), 'o', CACA_BLACK, CACA_MAGENTA);
+      if (on_canvas(scr_x(x1), scr_y(y1)))
+        put(scr_x(x1), scr_y(y1), 'o', CACA_BLACK, CACA_MAGENTA);
     } else {
       for (y = s->y; y < s->y + s->h; y++)
         for (x = s->x; x < s->x + s->w; x++) {
@@ -497,6 +575,20 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
     dgm_shape_default(g_shape, &gw, &gh);
     if (g_tool == TOOL_TEXT) { gw = 4; gh = 1; }
     draw_ghost(g_shape, g_drag_x1 - gw / 2, g_drag_y1 - gh / 2, gw, gh);
+  } else if (g_drag == DRAG_LINE) {
+    int ex = g_drag_x1, ey = g_drag_y1, dx, dy, ax, ay, steps, i;
+    uint32_t ch;
+    dgm_line_snap(g_drag_x0, g_drag_y0, &ex, &ey);
+    dx = ex - g_drag_x0; dy = ey - g_drag_y0;
+    ax = dx < 0 ? -dx : dx; ay = dy < 0 ? -dy : dy;
+    steps = ax > ay ? ax : ay;
+    ch = dgm_line_glyph(dx, dy, g_doc->style);
+    for (i = 0; i <= steps; i++) {
+      int lx = steps ? g_drag_x0 + dx * i / steps : g_drag_x0;
+      int ly = steps ? g_drag_y0 + dy * i / steps : g_drag_y0;
+      if (on_canvas(scr_x(lx), scr_y(ly)))
+        put(scr_x(lx), scr_y(ly), ch, CACA_BLACK, CACA_YELLOW);
+    }
   } else if (g_drag == DRAG_CONNECT) {
     int cx = g_drag_x0, cy = g_drag_y0;
     int steps = 0;
@@ -512,18 +604,23 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
   /* A label being typed is drawn where it will land, with a caret. */
   if (g_editing && g_sel >= 0 && g_sel < g_doc->n) {
     const dgm_shape_t *s = &g_doc->s[g_sel];
-    int lx = s->kind == DGM_NODE ? s->x + 1 : s->x;
-    int ly = s->kind == DGM_NODE ? s->y + s->h / 2 : s->y;
-    int maxw = s->kind == DGM_NODE ? s->w - 2 : view_w();
+    int is_node = (s->kind == DGM_NODE);
+    int maxw = is_node ? s->w - 2 : view_w();
+    int ly = is_node ? s->y + s->h / 2 : s->y;
     const char *shown = g_edit_buf;
     const char *nl = strrchr(g_edit_buf, '\n');
+    int n, off = 0, lx;
     if (nl) shown = nl + 1;
+    n = (int)strlen(shown);
+    if (maxw < 1) maxw = 1;
+    if (n > maxw - 1) off = n - (maxw - 1);      /* keep the caret in view */
+    /* Centre it in the shape, the way it will be drawn once committed — typing
+       into a box should look like the finished label, not like a field. */
+    lx = is_node ? s->x + 1 + (s->w - 2 - (n - off) - 1) / 2 : s->x;
+    if (lx < s->x + (is_node ? 1 : 0)) lx = s->x + (is_node ? 1 : 0);
     if (on_canvas(scr_x(lx), scr_y(ly))) {
-      int n = (int)strlen(shown), off = 0;
-      if (n > maxw - 1 && maxw > 1) off = n - (maxw - 1);
       put_str_clipped(scr_x(lx), scr_y(ly), shown + off, maxw, CACA_BLACK, CACA_WHITE);
-      if (n - off < maxw)
-        put(scr_x(lx) + (n - off), scr_y(ly), '_', CACA_BLACK, CACA_WHITE);
+      put(scr_x(lx) + (n - off), scr_y(ly), '_', CACA_BLACK, CACA_WHITE);
     }
   }
 
@@ -532,7 +629,9 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
     int ly = g_dview->y + g_dview->height - 1;
     char line[512];
     for (x = 0; x < g_dview->width; x++) put(g_dview->x + x, ly, ' ', CACA_BLACK, CACA_LIGHTGRAY);
-    if (g_confirm_quit)
+    if (g_prompt)
+      snprintf(line, sizeof line, "%s%s_", g_prompt_label, g_prompt_buf);
+    else if (g_confirm_quit)
       snprintf(line, sizeof line,
                "Leave the drawing behind?  y = insert it after all   n = discard it   C-g = stay");
     else if (g_dgm_msg[0])
@@ -555,16 +654,24 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
       snprintf(line, sizeof line, "Text: click where the label starts | 1 back to Select   ? help");
     else if (g_tool == TOOL_ERASE)
       snprintf(line, sizeof line,
-               "Eraser: drag rubs out loose characters one cell at a time · a click removes "
-               "the object under it | u undoes   1 back to Select");
+               "Eraser: drag rubs out characters one cell at a time (a shape becomes "
+               "characters first) | u undoes   1 back to Select");
+    else if (g_tool == TOOL_PENCIL)
+      snprintf(line, sizeof line,
+               "Freehand: drag to draw with '%c' · Space picks another character "
+               "| e erases   u undoes   1 back to Select", PEN_CHARS[g_pen]);
+    else if (g_tool == TOOL_LINE)
+      snprintf(line, sizeof line,
+               "Line: drag from one end to the other — plain, no arrowheads "
+               "| l links objects instead   u undoes   1 back to Select");
     else if (g_sel >= 0)
       snprintf(line, sizeof line,
-               "Drag it to move · # corner to resize · click an o handle then the other object "
-               "to link | Ret label  r shape  Del delete  u undo  q insert  ? help");
+               "Drag anywhere on it to move · # corner resizes · o handles link · "
+               "Ret label  r shape  C colour  B background  S dashed  Del  u undo");
     else
       snprintf(line, sizeof line,
                "Pick a shape on the left (or press its digit), then click the canvas | "
-               "Tab select  u undo  q insert it in the buffer  ? help");
+               "Tab select  C colour  S dashed  C-w .drawio  q insert  ? help");
     put_str_clipped(g_dview->x, ly, line, g_dview->width, CACA_BLACK, CACA_LIGHTGRAY);
   }
 
@@ -611,18 +718,28 @@ static void dgm_status(void)
   const char *base = (g_cur_buf >= 0 && g_cur_buf < g_nbuf && g_buffers[g_cur_buf].has_file)
                    ? g_buffers[g_cur_buf].path : "*scratch*";
   const char *slash = strrchr(base, '/');
-  int nb = 0, nc = 0, nt = 0, i;
+  int nb = 0, nc = 0, nt = 0, nl = 0, i;
   for (i = 0; i < g_doc->n; i++) {
-    if (g_doc->s[i].kind == DGM_NODE) nb++;
+    if (g_doc->s[i].kind == DGM_NODE)      nb++;
     else if (g_doc->s[i].kind == DGM_CONN) nc++;
+    else if (g_doc->s[i].kind == DGM_LINE) nl++;
     else nt++;
   }
   snprintf(buf, sizeof buf,
-           " %s%s  diagram  %s  %d shape%s %d link%s %d label%s  %s  %s",
+           " %s%s  diagram  %s  %d shape%s %d link%s %d line%s %d label%s  %s  %s",
            g_modified ? "**  " : "--  ", slash ? slash + 1 : base, tool_name(),
-           nb, nb == 1 ? "" : "s", nc, nc == 1 ? "" : "s", nt, nt == 1 ? "" : "s",
+           nb, nb == 1 ? "" : "s", nc, nc == 1 ? "" : "s",
+           nl, nl == 1 ? "" : "s", nt, nt == 1 ? "" : "s",
            g_doc->style == DGM_STYLE_UNICODE ? "unicode" : "ascii",
            g_ins_end > g_ins_start ? "q replaces the selection" : "q inserts at the cursor");
+  {                                            /* what the next object will look like */
+    char style[96];
+    int fg = g_sel >= 0 ? g_doc->s[g_sel].fg : g_new_fg;
+    int st = g_sel >= 0 ? g_doc->s[g_sel].stroke : g_new_stroke;
+    snprintf(style, sizeof style, "  [%s %s]",
+             fg == DGM_COLOR_DEFAULT ? "default" : gtcaca_color_name(fg), dgm_stroke_name(st));
+    strncat(buf, style, sizeof buf - strlen(buf) - 1);
+  }
   if (g_modeline) gtcaca_statusbar_set_text(g_modeline, buf);
 }
 
@@ -715,6 +832,14 @@ static void close_diagram(int keep)
 }
 
 /* Record one raw cell's previous value, so the stroke can be undone whole. */
+/* Milliseconds on a wall clock, for spotting a double-click. */
+static long now_ms(void)
+{
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (long)tv.tv_sec * 1000L + tv.tv_usec / 1000;
+}
+
 static void stroke_record(int x, int y, uint32_t was)
 {
   if (g_nstroke >= ERASE_MAX) return;
@@ -722,6 +847,25 @@ static void stroke_record(int x, int y, uint32_t was)
   g_stroke[g_nstroke].y = y;
   g_stroke[g_nstroke].ch = was;
   g_nstroke++;
+}
+
+/* Put one character on the background layer, remembering what it replaced.
+   Objects are drawn over this layer, so a stroke that runs under a shape is
+   kept but hidden — the message below says so rather than leaving you
+   wondering. */
+static int draw_at(int x, int y, uint32_t ch)
+{
+  uint32_t was;
+  if (x < 0 || y < 0 || x >= DGM_W || y >= DGM_H) return 0;
+  was = dgm_raw_get(g_doc, x, y);
+  if (was == ch) return 1;
+  stroke_record(x, y, was);
+  dgm_raw_put(g_doc, x, y, ch);
+  g_modified = 1;
+  if (dgm_hit(g_doc, x, y) >= 0)
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Drawing behind a shape — shapes cover the background layer");
+  return 1;
 }
 
 /* Rub out exactly one character — never a whole object; Del does that.
@@ -766,6 +910,66 @@ static int erase_at(int x, int y)
   return 1;
 }
 
+/* Export the objects as a .drawio file. The ASCII stays the thing that goes in
+   the document; this is the copy that keeps the colours. */
+static void export_drawio(const char *path)
+{
+  char full[PATH_MAX], err[160];
+  if (!path || !path[0]) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Export cancelled"); return; }
+  expand_tilde(path, full, sizeof full);
+  if (dgm_export_drawio(g_doc, full, err, sizeof err) != 0)
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "%s", err);
+  else
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Wrote %s — colours and all. q still inserts the ASCII here.", full);
+}
+
+/* Offer a sensible name next to the file being edited. */
+static void start_export(void)
+{
+  char suggestion[PATH_MAX];
+  const char *base = (g_cur_buf >= 0 && g_cur_buf < g_nbuf && g_buffers[g_cur_buf].has_file)
+                   ? g_buffers[g_cur_buf].path : "diagram";
+  const char *dot = strrchr(base, '.');
+  int keep = dot && dot != base ? (int)(dot - base) : (int)strlen(base);
+  snprintf(suggestion, sizeof suggestion, "%.*s.drawio", keep, base);
+  snprintf(g_prompt_label, sizeof g_prompt_label, "Export to: ");
+  snprintf(g_prompt_buf, sizeof g_prompt_buf, "%s", suggestion);
+  g_prompt_len = (int)strlen(g_prompt_buf);
+  g_prompt = 1;
+  g_dgm_msg[0] = '\0';
+}
+
+/* Give a freshly made object the style currently armed in the mode, so a run of
+   red dashed links does not have to be restyled one by one. */
+static void apply_new_style(int idx)
+{
+  if (idx < 0 || idx >= g_doc->n) return;
+  dgm_set_style(g_doc, idx, g_new_fg, g_new_bg, g_new_stroke);
+}
+
+/* Pick a colour with the toolkit's swatch dialog. Returns -2 if cancelled. */
+static int ask_colour(const char *what, int current)
+{
+  int c = gtcaca_colordialog_run(what, current == DGM_COLOR_DEFAULT ? -1 : current);
+  gtcaca_redraw();
+  return c < 0 ? -2 : c;
+}
+
+/* Restyle the selection, or arm the style for what comes next. */
+static void style_selection(int fg, int bg, int stroke)
+{
+  if (g_sel >= 0 && g_sel < g_doc->n) {
+    undo_push();
+    dgm_set_style(g_doc, g_sel, fg, bg, stroke);
+    g_modified = 1;
+  } else {
+    if (fg >= 0)     g_new_fg = fg;
+    if (bg >= 0)     g_new_bg = bg;
+    if (stroke >= 0) g_new_stroke = stroke;
+  }
+}
+
 /* Join two objects, or explain why nothing happened. Two objects are either
    linked or not — asking for a link that already exists (in either direction)
    selects it instead of stacking an invisible second one on the same route. */
@@ -788,6 +992,7 @@ static void link_objects(int from, int to)
   undo_push();
   c = dgm_add_conn(g_doc, from, to);
   if (c < 0) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Cannot link those two"); return; }
+  apply_new_style(c);
   g_sel = c;
   g_modified = 1;
   snprintf(g_dgm_msg, sizeof g_dgm_msg, "Linked");
@@ -869,10 +1074,22 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       erase_at(cx, cy);
       return 1;
     }
+    if (g_tool == TOOL_PENCIL) {
+      g_nstroke = 0;
+      g_drag = DRAG_PENCIL;
+      draw_at(cx, cy, (uint32_t)(unsigned char)PEN_CHARS[g_pen]);
+      return 1;
+    }
+    if (g_tool == TOOL_LINE) {                   /* anchor one end; drag out the other */
+      g_nstroke = 0;
+      g_drag = DRAG_LINE;
+      return 1;
+    }
     if (g_tool == TOOL_SHAPE) { g_drag = DRAG_NEWSHAPE; return 1; }
     if (g_tool == TOOL_TEXT) {
       undo_push();
       g_sel = dgm_add_text(g_doc, cx, cy, "");
+      apply_new_style(g_sel);
       g_modified = 1;
       palette_pick(0);                           /* one placement, then back to Select */
       begin_edit(g_sel);
@@ -880,6 +1097,27 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     }
 
     hit = dgm_hit(g_doc, cx, cy);
+    {   /* Double-click — the same object, the same cell, in quick succession.
+           Any of those missing is an ordinary click: selecting a shape and then
+           grabbing its corner must stay a resize, not turn into a rename. */
+      long t = now_ms();
+      int again = (hit >= 0 && hit == g_last_click_obj &&
+                   cx == g_last_click_x && cy == g_last_click_y &&
+                   t - g_last_click_ms < 500);
+      g_last_click_obj = hit;
+      g_last_click_x = cx;
+      g_last_click_y = cy;
+      g_last_click_ms = t;
+      if (again && g_tool == TOOL_SELECT) {
+        if (g_doc->s[hit].kind == DGM_CONN || g_doc->s[hit].kind == DGM_LINE)
+          snprintf(g_dgm_msg, sizeof g_dgm_msg, "A line carries no text — put a label beside it (t)");
+        else {
+          g_sel = hit;
+          begin_edit(hit);
+        }
+        return 1;
+      }
+    }
     if (hit < 0) {                               /* nothing here */
       int conn = dgm_hit_conn(g_doc, cx, cy);
       if (conn >= 0 && g_tool == TOOL_SELECT) { g_sel = conn; return 1; }
@@ -896,6 +1134,17 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       g_drag = DRAG_CONNECT;
       g_drag_shape = hit;
       snprintf(g_dgm_msg, sizeof g_dgm_msg, "Now click the object to link to");
+      return 1;
+    }
+    if (g_doc->s[hit].kind == DGM_LINE &&
+        dgm_hit_part(g_doc, hit, cx, cy) == DGM_HIT_CORNER) {
+      int x0, y0, x1, y1;                        /* grab the end that was clicked */
+      dgm_line_ends(&g_doc->s[hit], &x0, &y0, &x1, &y1);
+      undo_push();
+      g_drag = DRAG_LINE_END;
+      g_drag_shape = hit;
+      g_drag_ox = (cx == x0 && cy == y0) ? x1 : x0;   /* the end that stays put */
+      g_drag_oy = (cx == x0 && cy == y0) ? y1 : y0;
       return 1;
     }
     switch (dgm_hit_part(g_doc, hit, cx, cy)) {
@@ -926,6 +1175,24 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       g_modified = 1;
       break;
     }
+    case DRAG_PENCIL: {
+      /* Same interpolation as the eraser: a quick sweep must not leave gaps. */
+      int px = g_drag_x1 + pdx, py = g_drag_y1 + pdy;
+      int dx = cx - px, dy = cy - py;
+      int steps = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy)
+                ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy), i;
+      uint32_t ch = (uint32_t)(unsigned char)PEN_CHARS[g_pen];
+      if (steps > 512) steps = 512;
+      for (i = 0; i <= steps; i++)
+        draw_at(steps ? px + dx * i / steps : cx, steps ? py + dy * i / steps : cy, ch);
+      break;
+    }
+    case DRAG_LINE:
+      break;                                     /* drawn as a preview until released */
+    case DRAG_LINE_END:
+      dgm_line_set(g_doc, g_drag_shape, g_drag_ox, g_drag_oy, cx, cy);
+      g_modified = 1;
+      break;
     case DRAG_ERASE: {
       /* Terminals report motion in jumps, so rub out every cell between the
          last report and this one — otherwise a quick sweep leaves gaps. */
@@ -952,6 +1219,34 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
   }
 
   /* release */
+  if (g_drag == DRAG_PENCIL) {
+    int n = g_nstroke;
+    g_drag = DRAG_NONE;
+    undo_push_cells();
+    if (n && !g_dgm_msg[0])
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Drew %d character%s  (u undoes)",
+               n, n == 1 ? "" : "s");
+    return 1;
+  }
+  if (g_drag == DRAG_LINE) {
+    int idx;
+    g_drag = DRAG_NONE;
+    undo_push();
+    idx = dgm_add_line(g_doc, g_drag_x0, g_drag_y0, cx, cy);
+    apply_new_style(idx);
+    if (idx >= 0) {
+      g_sel = idx;
+      g_modified = 1;
+      snprintf(g_dgm_msg, sizeof g_dgm_msg,
+               "Line drawn — drag it to move, drag an end to re-aim, Del removes it");
+      palette_pick(0);
+    } else snprintf(g_dgm_msg, sizeof g_dgm_msg, "Drag from one end of the line to the other");
+    return 1;
+  }
+  if (g_drag == DRAG_LINE_END) {
+    g_drag = DRAG_NONE;
+    return 1;
+  }
   if (g_drag == DRAG_ERASE) {
     int rubbed = 0, i;
     g_drag = DRAG_NONE;
@@ -975,6 +1270,7 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     if (bw < 3 && bh < 3) { bw = dw; bh = dh; }
     undo_push();
     g_sel = dgm_add_node(g_doc, g_shape, bx, by, bw, bh, "");
+      apply_new_style(g_sel);
     g_modified = 1;
     g_drag = DRAG_NONE;
     palette_pick(0);                             /* one placement, then back to Select */
@@ -988,9 +1284,11 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       undo_push();
       if (g_tool == TOOL_TEXT) {
         g_sel = dgm_add_text(g_doc, cx, cy, "");
+      apply_new_style(g_sel);
       } else {
         dgm_shape_default(g_shape, &dw, &dh);
         g_sel = dgm_add_node(g_doc, g_shape, cx - dw / 2, cy - dh / 2, dw, dh, "");
+      apply_new_style(g_sel);
       }
       g_modified = 1;
       palette_pick(0);
@@ -1026,18 +1324,21 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
 /* Typing into the label editor or a prompt. Returns 1 if the key was eaten. */
 static int typing_key(int key)
 {
-  char  *buf = g_edit_buf;
-  int   *len = &g_edit_len;
-  size_t cap = sizeof g_edit_buf;
+  char  *buf = g_editing ? g_edit_buf : g_prompt_buf;
+  int   *len = g_editing ? &g_edit_len : &g_prompt_len;
+  size_t cap = g_editing ? sizeof g_edit_buf : sizeof g_prompt_buf;
 
   switch (key) {
   case CACA_KEY_RETURN:
   case 10:
-    commit_edit(1);
+    if (g_editing) commit_edit(1);
+    else { char tmp[PATH_MAX]; g_prompt = 0;
+           snprintf(tmp, sizeof tmp, "%s", g_prompt_buf); export_drawio(tmp); }
     return 1;
   case CACA_KEY_ESCAPE:
   case 7:                                        /* C-g */
-    commit_edit(0);
+    if (g_editing) commit_edit(0);
+    else { g_prompt = 0; snprintf(g_dgm_msg, sizeof g_dgm_msg, "Export cancelled"); }
     return 1;
   case CACA_KEY_BACKSPACE:
   case CACA_KEY_DELETE:
@@ -1045,7 +1346,7 @@ static int typing_key(int key)
     if (*len > 0) buf[--(*len)] = '\0';
     return 1;
   case 15:                                       /* C-o: a second label line */
-    if ((size_t)*len + 2 < cap) { buf[(*len)++] = '\n'; buf[*len] = '\0'; }
+    if (g_editing && (size_t)*len + 2 < cap) { buf[(*len)++] = '\n'; buf[*len] = '\0'; }
     return 1;
   default:
     break;
@@ -1070,7 +1371,8 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
   (void)w; (void)ud;
   if (!g_dgm_open) return 0;
 
-  if (g_editing) return typing_key(key);
+  if (g_editing || g_prompt) return typing_key(key);
+  g_last_click_obj = -1;      /* a keystroke ends any double-click in progress */
 
   if (g_confirm_quit) {
     switch (key) {
@@ -1110,6 +1412,14 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
     return 1;
 
   case 'e': palette_pick(12); return 1;          /* the eraser */
+  case 'f': palette_pick(13); return 1;          /* freehand */
+  case '-': palette_pick(14); return 1;          /* a plain line */
+  case ' ':                                      /* pick the pen's character */
+    if (g_tool == TOOL_PENCIL) {
+      g_pen = (g_pen + 1) % (int)(sizeof PEN_CHARS - 1);
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Drawing with '%c'", PEN_CHARS[g_pen]);
+    } else palette_pick(13);                     /* Space also reaches for the pen */
+    return 1;
   case 'v': palette_pick(0); return 1;
   case 'b': palette_pick(1); return 1;           /* the plain box, the common case */
   case 't': palette_pick(10); return 1;
@@ -1154,11 +1464,13 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
     if (g_tool == TOOL_SHAPE || g_tool == TOOL_TEXT || g_sel < 0) {
       int dw, dh;                                /* place the armed shape at the cursor */
       undo_push();
-      if (g_tool == TOOL_TEXT) g_sel = dgm_add_text(g_doc, g_cur_x, g_cur_y, "");
-      else {
+      if (g_tool == TOOL_TEXT) {
+        g_sel = dgm_add_text(g_doc, g_cur_x, g_cur_y, "");
+      } else {
         dgm_shape_default(g_shape, &dw, &dh);
         g_sel = dgm_add_node(g_doc, g_shape, g_cur_x, g_cur_y, dw, dh, "");
       }
+      apply_new_style(g_sel);
       g_modified = 1;
       palette_pick(0);
       if (g_sel >= 0) begin_edit(g_sel);
@@ -1171,8 +1483,35 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
     undo_push();
     dgm_shape_default(g_shape, &dw, &dh);
     g_sel = dgm_add_node(g_doc, g_shape, g_cur_x, g_cur_y, dw, dh, "");
+      apply_new_style(g_sel);
     g_modified = 1;
     if (g_sel >= 0) begin_edit(g_sel);
+    return 1;
+  }
+  case 'C': {                                    /* colour, from the swatch dialog */
+    int cur = g_sel >= 0 ? g_doc->s[g_sel].fg : g_new_fg;
+    int c = ask_colour("Colour", cur);
+    if (c == -2) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Colour unchanged"); return 1; }
+    style_selection(c, -1, -1);
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "%s in %s%s", g_sel >= 0 ? "Drawn" : "New objects",
+             gtcaca_color_name(c), g_sel >= 0 ? "" : " from now on");
+    return 1;
+  }
+  case 'B': {                                    /* background behind it */
+    int cur = g_sel >= 0 ? g_doc->s[g_sel].bg : g_new_bg;
+    int c = ask_colour("Background", cur);
+    if (c == -2) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Background unchanged"); return 1; }
+    style_selection(-1, c, -1);
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "Background %s", gtcaca_color_name(c));
+    return 1;
+  }
+  case 'S': {                                    /* solid → dashed → dotted */
+    int cur = (g_sel >= 0 ? g_doc->s[g_sel].stroke : g_new_stroke);
+    int next = (cur + 1) % DGM_NSTROKES;
+    style_selection(-1, -1, next);
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "%s stroke%s", dgm_stroke_name(next),
+             g_sel >= 0 && g_doc->s[g_sel].kind == DGM_NODE
+               ? " (shapes stay solid — it shows on lines and links)" : "");
     return 1;
   }
   case 'u': undo_pop(); return 1;
@@ -1219,6 +1558,9 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
              g_doc->style == DGM_STYLE_UNICODE ? "Unicode" : "ASCII");
     return 1;
 
+  case 0x17:                                     /* C-w: keep a .drawio copy */
+    start_export();
+    return 1;
   case KEY_CTRL_S:                               /* the buffer is saved the usual way */
     snprintf(g_dgm_msg, sizeof g_dgm_msg,
              "q puts the diagram in the buffer — then C-x C-s saves the file as usual");
@@ -1328,7 +1670,9 @@ void run_diagram(void)
     g_doc = dgm_new();
     g_grid.w = DGM_W; g_grid.h = DGM_H;
     g_grid.cell = malloc((size_t)g_grid.w * g_grid.h * sizeof *g_grid.cell);
-    if (!g_doc || !g_grid.cell) {
+    g_grid.fg   = malloc((size_t)g_grid.w * g_grid.h);
+    g_grid.bg   = malloc((size_t)g_grid.w * g_grid.h);
+    if (!g_doc || !g_grid.cell || !g_grid.fg || !g_grid.bg) {
       snprintf(g_message, sizeof g_message, "Diagram: out of memory");
       return;
     }
@@ -1391,7 +1735,7 @@ void run_diagram(void)
   g_cur_x = g_cur_y = 2;
   g_vx = g_vy = 0;
   g_drag = DRAG_NONE;
-  g_editing = g_confirm_quit = g_show_help = 0;
+  g_editing = g_prompt = g_confirm_quit = g_show_help = 0;
   g_modified = 0;
   undo_clear();
   if (g_doc->n)

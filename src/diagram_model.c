@@ -179,6 +179,7 @@ int dgm_add_node(dgm_doc_t *d, int shape, int x, int y, int w, int h, const char
   s = &d->s[d->n];
   memset(s, 0, sizeof *s);
   s->kind = DGM_NODE; s->shape = shape;
+  s->fg = s->bg = DGM_COLOR_DEFAULT;
   s->x = x; s->y = y; s->w = w; s->h = h;
   s->from = s->to = -1;
   if (label) { strncpy(s->label, label, DGM_LABEL_MAX - 1); s->label[DGM_LABEL_MAX - 1] = '\0'; }
@@ -216,7 +217,8 @@ int dgm_add_text(dgm_doc_t *d, int x, int y, const char *text)
   clampf(&x, 0, DGM_W - 1); clampf(&y, 0, DGM_H - 1);
   s = &d->s[d->n];
   memset(s, 0, sizeof *s);
-  s->kind = DGM_TEXT; s->x = x; s->y = y; s->w = lw > 0 ? lw : 1; s->h = lh;
+  s->kind = DGM_TEXT; s->x = x; s->y = y;
+  s->fg = s->bg = DGM_COLOR_DEFAULT; s->w = lw > 0 ? lw : 1; s->h = lh;
   s->from = s->to = -1;
   if (text) { strncpy(s->label, text, DGM_LABEL_MAX - 1); s->label[DGM_LABEL_MAX - 1] = '\0'; }
   return d->n++;
@@ -250,6 +252,7 @@ int dgm_add_conn(dgm_doc_t *d, int from, int to)
   s = &d->s[d->n];
   memset(s, 0, sizeof *s);
   s->kind = DGM_CONN; s->from = from; s->to = to; s->arrow_to = 1;
+  s->fg = s->bg = DGM_COLOR_DEFAULT;
   return d->n++;
 }
 
@@ -321,6 +324,18 @@ void dgm_resize(dgm_doc_t *d, int idx, int dw, int dh)
   dgm_shape_t *s;
   if (idx < 0 || idx >= d->n) return;
   s = &d->s[idx];
+  if (s->kind == DGM_LINE) {                     /* stretch the far end */
+    s->w += dw; s->h += dh;
+    if (s->w < 1) s->w = 1;
+    if (s->h < 1) s->h = 1;
+    if (s->w > 1 && s->h > 1) {                  /* keep it a clean 45° run */
+      int n = s->w < s->h ? s->w : s->h;
+      s->w = s->h = n;
+    }
+    clampf(&s->w, 1, DGM_W - s->x);
+    clampf(&s->h, 1, DGM_H - s->y);
+    return;
+  }
   if (s->kind != DGM_NODE) return;
   s->w += dw; s->h += dh;
   clampf(&s->w, 1, DGM_W - s->x);
@@ -344,6 +359,94 @@ void dgm_place(dgm_doc_t *d, int idx, int x, int y, int w, int h)
   fit_shape(s);
 }
 
+/* ── lines ──────────────────────────────────────────────────────────────────
+   A line is stored as its bounding box plus which way it leans, so everything
+   that already works on a rectangle — moving, hit testing, linking, the extent
+   of the drawing — works on it unchanged. */
+
+uint32_t dgm_line_glyph(int dx, int dy, int style)
+{
+  int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+  int unicode = (style == DGM_STYLE_UNICODE);
+  if (ay == 0) return unicode ? 0x2500 : '-';
+  if (ax == 0) return unicode ? 0x2502 : '|';
+  return ((dx > 0) == (dy > 0)) ? '\\' : '/';
+}
+
+void dgm_line_ends(const dgm_shape_t *s, int *x0, int *y0, int *x1, int *y1)
+{
+  if (s->dir) { *x0 = s->x + s->w - 1; *y0 = s->y; *x1 = s->x; *y1 = s->y + s->h - 1; }
+  else        { *x0 = s->x;            *y0 = s->y; *x1 = s->x + s->w - 1; *y1 = s->y + s->h - 1; }
+}
+
+/* Snap to the three runs a character grid can draw cleanly: horizontal,
+   vertical, or a true 45° diagonal. */
+void dgm_line_snap(int x0, int y0, int *x1, int *y1)
+{
+  int dx = *x1 - x0, dy = *y1 - y0;
+  int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+  if (ay * 2 < ax)      { *y1 = y0; }
+  else if (ax * 2 < ay) { *x1 = x0; }
+  else {
+    int n = ax < ay ? ax : ay;
+    *x1 = x0 + (dx < 0 ? -n : n);
+    *y1 = y0 + (dy < 0 ? -n : n);
+  }
+}
+
+/* Fill in a line's rectangle from a pair of (already snapped) ends. */
+static void line_set_ends(dgm_shape_t *s, int x0, int y0, int x1, int y1)
+{
+  s->x = x0 < x1 ? x0 : x1;
+  s->y = y0 < y1 ? y0 : y1;
+  s->w = (x0 < x1 ? x1 - x0 : x0 - x1) + 1;
+  s->h = (y0 < y1 ? y1 - y0 : y0 - y1) + 1;
+  s->dir = ((x1 >= x0) == (y1 >= y0)) ? 0 : 1;
+}
+
+int dgm_add_line(dgm_doc_t *d, int x0, int y0, int x1, int y1)
+{
+  dgm_shape_t *s;
+
+  if (d->n >= DGM_MAX_SHAPES) return -1;
+  clampf(&x0, 0, DGM_W - 1); clampf(&y0, 0, DGM_H - 1);
+  clampf(&x1, 0, DGM_W - 1); clampf(&y1, 0, DGM_H - 1);
+  dgm_line_snap(x0, y0, &x1, &y1);
+  if (x0 == x1 && y0 == y1) return -1;           /* a click, not a line */
+
+  s = &d->s[d->n];
+  memset(s, 0, sizeof *s);
+  s->kind = DGM_LINE;
+  s->fg = s->bg = DGM_COLOR_DEFAULT;
+  s->from = s->to = -1;
+  line_set_ends(s, x0, y0, x1, y1);
+  return d->n++;
+}
+
+void dgm_line_set(dgm_doc_t *d, int idx, int x0, int y0, int x1, int y1)
+{
+  if (idx < 0 || idx >= d->n || d->s[idx].kind != DGM_LINE) return;
+  clampf(&x0, 0, DGM_W - 1); clampf(&y0, 0, DGM_H - 1);
+  clampf(&x1, 0, DGM_W - 1); clampf(&y1, 0, DGM_H - 1);
+  dgm_line_snap(x0, y0, &x1, &y1);
+  if (x0 == x1 && y0 == y1) return;
+  line_set_ends(&d->s[idx], x0, y0, x1, y1);
+}
+
+/* Is (x, y) one of the cells the line actually passes through? Its bounding box
+   is mostly empty for a diagonal, so this is checked cell-exactly. */
+static int line_covers(const dgm_shape_t *s, int x, int y)
+{
+  int x0, y0, x1, y1, dx, dy;
+  dgm_line_ends(s, &x0, &y0, &x1, &y1);
+  if (y0 == y1) return y == y0 && x >= (x0 < x1 ? x0 : x1) && x <= (x0 < x1 ? x1 : x0);
+  if (x0 == x1) return x == x0 && y >= (y0 < y1 ? y0 : y1) && y <= (y0 < y1 ? y1 : y0);
+  dx = x - x0; dy = y - y0;
+  if ((dx < 0 ? -dx : dx) != (dy < 0 ? -dy : dy)) return 0;
+  if (x1 > x0 ? (x < x0 || x > x1) : (x > x0 || x < x1)) return 0;
+  return (dx > 0) == (x1 > x0) || dx == 0;
+}
+
 /* ── hit testing ────────────────────────────────────────────────────────────*/
 
 int dgm_hit(const dgm_doc_t *d, int x, int y)
@@ -352,6 +455,7 @@ int dgm_hit(const dgm_doc_t *d, int x, int y)
   for (i = 0; i < d->n; i++) {            /* later shapes draw on top */
     const dgm_shape_t *s = &d->s[i];
     if (s->kind == DGM_CONN) continue;
+    if (s->kind == DGM_LINE) { if (line_covers(s, x, y)) hit = i; continue; }
     if (x >= s->x && x < s->x + s->w && y >= s->y && y < s->y + s->h) hit = i;
   }
   return hit;
@@ -385,10 +489,20 @@ int dgm_hit_part(const dgm_doc_t *d, int idx, int x, int y)
   int on_edge;
   if (idx < 0 || idx >= d->n) return DGM_HIT_NONE;
   s = &d->s[idx];
-  if (x < s->x || x >= s->x + s->w || y < s->y || y >= s->y + s->h) return DGM_HIT_NONE;
+  if (s->kind == DGM_LINE) { if (!line_covers(s, x, y)) return DGM_HIT_NONE; }
+  else if (x < s->x || x >= s->x + s->w || y < s->y || y >= s->y + s->h) return DGM_HIT_NONE;
+  if (s->kind == DGM_LINE) {
+    int x0, y0, x1, y1;
+    dgm_line_ends(s, &x0, &y0, &x1, &y1);
+    if ((x == x0 && y == y0) || (x == x1 && y == y1)) return DGM_HIT_CORNER;
+    return DGM_HIT_INSIDE;
+  }
   if (s->kind != DGM_NODE) return DGM_HIT_INSIDE;
   if (x == s->x + s->w - 1 && y == s->y + s->h - 1) return DGM_HIT_CORNER;
-  on_edge = (x == s->x || x == s->x + s->w - 1 || y == s->y || y == s->y + s->h - 1);
+  /* Only the four handles start a link; the rest of the border moves the
+     object, which is what dragging an edge looks like it should do. */
+  on_edge = (x == s->x + s->w / 2 && (y == s->y || y == s->y + s->h - 1)) ||
+            (y == s->y + s->h / 2 && (x == s->x || x == s->x + s->w - 1));
   return on_edge ? DGM_HIT_BORDER : DGM_HIT_INSIDE;
 }
 
@@ -413,10 +527,46 @@ void dgm_extent(const dgm_doc_t *d, int *w, int *h)
 
 /* ── rendering ──────────────────────────────────────────────────────────────*/
 
+/* The colours of the object currently being drawn; gput paints with them. */
+static int g_pen_fg = DGM_COLOR_DEFAULT, g_pen_bg = DGM_COLOR_DEFAULT;
+
 static void gput(dgm_grid_t *g, int x, int y, uint32_t ch)
 {
+  int i;
   if (x < 0 || y < 0 || x >= g->w || y >= g->h) return;
-  g->cell[y * g->w + x] = ch;
+  i = y * g->w + x;
+  g->cell[i] = ch;
+  if (g->fg) g->fg[i] = (uint8_t)g_pen_fg;
+  if (g->bg) g->bg[i] = (uint8_t)g_pen_bg;
+}
+
+static void pen_from(const dgm_shape_t *s)
+{
+  g_pen_fg = s ? s->fg : DGM_COLOR_DEFAULT;
+  g_pen_bg = s ? s->bg : DGM_COLOR_DEFAULT;
+}
+
+const char *dgm_stroke_name(int stroke)
+{
+  return stroke == DGM_DASHED ? "dashed" : stroke == DGM_DOTTED ? "dotted" : "solid";
+}
+
+void dgm_set_style(dgm_doc_t *d, int idx, int fg, int bg, int stroke)
+{
+  if (idx < 0 || idx >= d->n) return;
+  if (fg >= 0)     d->s[idx].fg = fg;
+  if (bg >= 0)     d->s[idx].bg = bg;
+  if (stroke >= 0) d->s[idx].stroke = stroke % DGM_NSTROKES;
+}
+
+/* Is the i-th cell of a stroked run drawn, and with which character? Returns 0
+   for a gap. */
+static int stroke_cell(int stroke, int i, uint32_t solid, uint32_t *out)
+{
+  if (stroke == DGM_DASHED) { if (i % 2) return 0; *out = solid; return 1; }
+  if (stroke == DGM_DOTTED) { if (i % 2) return 0; *out = '.';   return 1; }
+  *out = solid;
+  return 1;
 }
 
 static uint32_t gget(const dgm_grid_t *g, int x, int y)
@@ -688,8 +838,25 @@ static void draw_actor(dgm_grid_t *g, const dgm_shape_t *s)
   gput(g, cx + 1, legs, '\\');
 }
 
+static void draw_line_obj(const dgm_doc_t *d, dgm_grid_t *g, const dgm_shape_t *s)
+{
+  int x0, y0, x1, y1, dx, dy, ax, ay, steps, i;
+  uint32_t solid, ch;
+  dgm_line_ends(s, &x0, &y0, &x1, &y1);
+  dx = x1 - x0; dy = y1 - y0;
+  ax = dx < 0 ? -dx : dx; ay = dy < 0 ? -dy : dy;
+  steps = ax > ay ? ax : ay;
+  solid = dgm_line_glyph(dx, dy, d->style);
+  pen_from(s);
+  for (i = 0; i <= steps; i++)
+    if (stroke_cell(s->stroke, i, solid, &ch))
+      gput(g, steps ? x0 + dx * i / steps : x0, steps ? y0 + dy * i / steps : y0, ch);
+  pen_from(NULL);
+}
+
 static void draw_node(const dgm_doc_t *d, dgm_grid_t *g, const dgm_shape_t *s)
 {
+  pen_from(s);
   clear_node(g, s);
   switch (s->shape) {
   case DGM_ELLIPSE:
@@ -701,6 +868,7 @@ static void draw_node(const dgm_doc_t *d, dgm_grid_t *g, const dgm_shape_t *s)
   default:           draw_rect_like(d, g, s); break;
   }
   draw_label(g, s);
+  pen_from(NULL);
 }
 
 static void draw_text(dgm_grid_t *g, const dgm_shape_t *s)
@@ -772,21 +940,23 @@ static uint32_t arrow_glyph(int dx, int dy)
 
 static void draw_conn(const dgm_doc_t *d, dgm_grid_t *g, int conn)
 {
-  int px[4], py[4], n, i;
+  int px[4], py[4], n, i, k;
   glyphs_t gl = style_glyphs(d->style, 0);
   const dgm_shape_t *c = &d->s[conn];
 
   n = dgm_route(d, conn, px, py, 4);
   if (n < 2) return;
 
-  for (i = 0; i + 1 < n; i++) {                          /* the straight runs */
+  pen_from(c);
+  for (i = 0, k = 0; i + 1 < n; i++) {                   /* the straight runs */
     int x = px[i], y = py[i], tx = px[i + 1], ty = py[i + 1];
     int sx = (tx > x) - (tx < x), sy = (ty > y) - (ty < y);
-    while (x != tx || y != ty) {
-      gput(g, x, y, sx ? gl.hz : gl.vt);
+    uint32_t ch;
+    for (;;) {
+      if (stroke_cell(c->stroke, k++, sx ? gl.hz : gl.vt, &ch)) gput(g, x, y, ch);
+      if (x == tx && y == ty) break;
       x += sx; y += sy;
     }
-    gput(g, tx, ty, sx ? gl.hz : gl.vt);
   }
   for (i = 1; i + 1 < n; i++) {                          /* the turns */
     int idx = (px[i] > px[i - 1]) - (px[i] < px[i - 1]);
@@ -805,22 +975,33 @@ static void draw_conn(const dgm_doc_t *d, dgm_grid_t *g, int conn)
     int dy = (py[0] > py[1]) - (py[0] < py[1]);
     gput(g, px[0], py[0], arrow_glyph(dx, dy));
   }
+  pen_from(NULL);
 }
 
 void dgm_render(const dgm_doc_t *d, dgm_grid_t *g)
 {
   int i, x, y;
 
-  for (i = 0; i < g->w * g->h; i++) g->cell[i] = ' ';
+  for (i = 0; i < g->w * g->h; i++) {
+    g->cell[i] = ' ';
+    if (g->fg) g->fg[i] = DGM_COLOR_DEFAULT;
+    if (g->bg) g->bg[i] = DGM_COLOR_DEFAULT;
+  }
 
   if (d->has_raw)                              /* whatever the recogniser kept */
     for (y = 0; y < DGM_H && y < g->h; y++)
       for (x = 0; x < DGM_W && x < g->w; x++)
         if (d->raw[y][x] && d->raw[y][x] != ' ') gput(g, x, y, d->raw[y][x]);
 
+  for (i = 0; i < d->n; i++) if (d->s[i].kind == DGM_LINE) draw_line_obj(d, g, &d->s[i]);
   for (i = 0; i < d->n; i++) if (d->s[i].kind == DGM_CONN) draw_conn(d, g, i);
   for (i = 0; i < d->n; i++) if (d->s[i].kind == DGM_NODE) draw_node(d, g, &d->s[i]);
-  for (i = 0; i < d->n; i++) if (d->s[i].kind == DGM_TEXT) draw_text(g, &d->s[i]);
+  for (i = 0; i < d->n; i++)
+    if (d->s[i].kind == DGM_TEXT) {
+      pen_from(&d->s[i]);
+      draw_text(g, &d->s[i]);
+      pen_from(NULL);
+    }
 }
 
 int dgm_flatten(dgm_doc_t *d, int idx, dgm_cell_t *undo, int max, int *nundo)
@@ -838,6 +1019,7 @@ int dgm_flatten(dgm_doc_t *d, int idx, dgm_cell_t *undo, int max, int *nundo)
   with = dgm_new();
   without = dgm_new();
   ga.w = gb.w = DGM_W; ga.h = gb.h = DGM_H;
+  ga.fg = ga.bg = gb.fg = gb.bg = NULL;
   ga.cell = malloc((size_t)ga.w * ga.h * sizeof *ga.cell);
   gb.cell = malloc((size_t)gb.w * gb.h * sizeof *gb.cell);
   if (!with || !without || !ga.cell || !gb.cell) {
@@ -895,6 +1077,7 @@ int dgm_to_text(const dgm_doc_t *d, char *out, size_t outsz)
   int x, y, last_row = -1, rc = 0;
 
   g.w = DGM_W; g.h = DGM_H;
+  g.fg = g.bg = NULL;                            /* the ASCII output has no colour */
   g.cell = malloc((size_t)g.w * g.h * sizeof *g.cell);
   if (!g.cell) return -1;
   dgm_render(d, &g);
@@ -1394,6 +1577,31 @@ int dgm_parse_text(dgm_doc_t *d, const char *text)
       }
     }
 
+  /* 3b. straight runs that join nothing: plain lines, which are objects too —
+         you can select one, drag it, re-aim an end or delete it. */
+  for (y = 0; y < p.h; y++)
+    for (x = 0; x < p.w; x++) {
+      static const int STEP[4][2] = { {1, 0}, {0, 1}, {1, 1}, {1, -1} };
+      uint32_t ch = pget(&p, x, y);
+      int k;
+      if (pused(&p, x, y)) continue;
+      for (k = 0; k < 4; k++) {
+        int sx = STEP[k][0], sy = STEP[k][1], len = 0, c, r;
+        uint32_t want = k == 0 ? (ch == 0x2500 ? 0x2500 : '-')
+                      : k == 1 ? (ch == 0x2502 ? 0x2502 : '|')
+                      : k == 2 ? '\\' : '/';
+        if (ch != want) continue;
+        if (pget(&p, x - sx, y - sy) == want && !pused(&p, x - sx, y - sy)) continue; /* not the start */
+        for (c = x, r = y; pget(&p, c, r) == want && !pused(&p, c, r); c += sx, r += sy) len++;
+        if (len < 2) continue;
+        if (dgm_add_line(d, x, y, x + sx * (len - 1), y + sy * (len - 1)) >= 0) {
+          for (c = x, r = y; len > 0; c += sx, r += sy, len--) puse(&p, c, r, -1);
+          found++;
+        }
+        break;
+      }
+    }
+
   /* 4. the leftovers, kept verbatim */
   for (y = 0; y < p.h; y++)
     for (x = 0; x < p.w; x++) {
@@ -1406,4 +1614,140 @@ int dgm_parse_text(dgm_doc_t *d, const char *text)
 done:
   free(p.c); free(p.used); free(p.owner); free(cm.stack); free(cells); free(rejected);
   return found;
+}
+
+/* ── draw.io export ─────────────────────────────────────────────────────────
+ *
+ * mxGraph XML, the format app.diagrams.net reads. A canvas cell becomes a
+ * 10x18 pixel box, which is about the aspect a terminal cell has, so a diagram
+ * lands there looking like it does here. */
+
+static const char *DRAWIO_HEX[16] = {
+  "#000000", "#0000AA", "#00AA00", "#00AAAA", "#AA0000", "#AA00AA", "#AA5500", "#AAAAAA",
+  "#555555", "#5555FF", "#55FF55", "#55FFFF", "#FF5555", "#FF55FF", "#FFFF55", "#FFFFFF"
+};
+
+#define DRAWIO_CW 10
+#define DRAWIO_CH 18
+
+/* mxGraph's style string for a node shape. */
+static const char *drawio_shape_style(int shape)
+{
+  switch (shape) {
+  case DGM_ROUNDED:  return "rounded=1;whiteSpace=wrap;html=1;";
+  case DGM_DIAMOND:  return "rhombus;whiteSpace=wrap;html=1;";
+  case DGM_CIRCLE:   return "ellipse;whiteSpace=wrap;html=1;aspect=fixed;";
+  case DGM_ELLIPSE:  return "ellipse;whiteSpace=wrap;html=1;";
+  case DGM_CLOUD:    return "shape=cloud;whiteSpace=wrap;html=1;";
+  case DGM_CYLINDER: return "shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;";
+  case DGM_HEXAGON:  return "shape=hexagon;whiteSpace=wrap;html=1;";
+  case DGM_ACTOR:    return "shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;";
+  default:           return "rounded=0;whiteSpace=wrap;html=1;";
+  }
+}
+
+/* XML-escape a label (and turn our newlines into <br>, which is what draw.io
+   uses inside an html=1 label). */
+static void drawio_escape(const char *in, char *out, size_t outsz)
+{
+  size_t n = 0;
+  for (; *in && n + 8 < outsz; in++) {
+    const char *rep = NULL;
+    switch (*in) {
+    case '&':  rep = "&amp;";  break;
+    case '<':  rep = "&lt;";   break;
+    case '>':  rep = "&gt;";   break;
+    case '"':  rep = "&quot;"; break;
+    case '\n': rep = "&#10;";  break;
+    default:   break;
+    }
+    if (rep) { size_t l = strlen(rep); memcpy(out + n, rep, l); n += l; }
+    else out[n++] = *in;
+  }
+  out[n] = '\0';
+}
+
+/* Append this object's colours and dash pattern to a style string. */
+static void drawio_style_extras(const dgm_shape_t *s, char *out, size_t outsz, int is_edge)
+{
+  char buf[160];
+  out[0] = '\0';
+  if (s->fg != DGM_COLOR_DEFAULT && s->fg < 16) {
+    snprintf(buf, sizeof buf, "strokeColor=%s;%s%s;", DRAWIO_HEX[s->fg],
+             is_edge ? "" : "fontColor=", is_edge ? "" : DRAWIO_HEX[s->fg]);
+    strncat(out, buf, outsz - strlen(out) - 1);
+  }
+  if (s->bg != DGM_COLOR_DEFAULT && s->bg < 16) {
+    snprintf(buf, sizeof buf, "fillColor=%s;", DRAWIO_HEX[s->bg]);
+    strncat(out, buf, outsz - strlen(out) - 1);
+  } else if (!is_edge) {
+    strncat(out, "fillColor=none;", outsz - strlen(out) - 1);
+  }
+  if (s->stroke == DGM_DASHED) strncat(out, "dashed=1;", outsz - strlen(out) - 1);
+  else if (s->stroke == DGM_DOTTED) strncat(out, "dashed=1;dashPattern=1 4;", outsz - strlen(out) - 1);
+}
+
+int dgm_export_drawio(const dgm_doc_t *d, const char *path, char *err, size_t errsz)
+{
+  FILE *f = fopen(path, "wb");
+  char label[DGM_LABEL_MAX * 6], extras[256];
+  int i;
+
+  if (!f) { if (err) snprintf(err, errsz, "cannot write %s", path); return -1; }
+
+  fprintf(f, "<mxfile host=\"ccm\" type=\"device\">\n"
+             "  <diagram name=\"Page-1\">\n"
+             "    <mxGraphModel dx=\"1200\" dy=\"800\" grid=\"1\" gridSize=\"10\" page=\"1\" "
+             "pageWidth=\"1169\" pageHeight=\"826\" math=\"0\" shadow=\"0\">\n"
+             "      <root>\n"
+             "        <mxCell id=\"0\" />\n"
+             "        <mxCell id=\"1\" parent=\"0\" />\n");
+
+  for (i = 0; i < d->n; i++) {            /* nodes and free text become vertices */
+    const dgm_shape_t *s = &d->s[i];
+    if (s->kind != DGM_NODE && s->kind != DGM_TEXT) continue;
+    drawio_escape(s->label, label, sizeof label);
+    drawio_style_extras(s, extras, sizeof extras, 0);
+    fprintf(f, "        <mxCell id=\"n%d\" value=\"%s\" style=\"%s%s\" vertex=\"1\" parent=\"1\">\n"
+               "          <mxGeometry x=\"%d\" y=\"%d\" width=\"%d\" height=\"%d\" as=\"geometry\" />\n"
+               "        </mxCell>\n",
+            i, label,
+            s->kind == DGM_TEXT ? "text;html=1;align=left;verticalAlign=middle;"
+                                : drawio_shape_style(s->shape),
+            extras,
+            s->x * DRAWIO_CW, s->y * DRAWIO_CH, s->w * DRAWIO_CW, s->h * DRAWIO_CH);
+  }
+
+  for (i = 0; i < d->n; i++) {            /* links keep their two ends */
+    const dgm_shape_t *s = &d->s[i];
+    if (s->kind != DGM_CONN) continue;
+    drawio_style_extras(s, extras, sizeof extras, 1);
+    fprintf(f, "        <mxCell id=\"e%d\" style=\"edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;"
+               "startArrow=%s;endArrow=%s;%s\" edge=\"1\" parent=\"1\" source=\"n%d\" target=\"n%d\">\n"
+               "          <mxGeometry relative=\"1\" as=\"geometry\" />\n"
+               "        </mxCell>\n",
+            i, s->arrow_from ? "classic" : "none", s->arrow_to ? "classic" : "none",
+            extras, s->from, s->to);
+  }
+
+  for (i = 0; i < d->n; i++) {            /* plain lines: an edge with fixed ends */
+    const dgm_shape_t *s = &d->s[i];
+    int x0, y0, x1, y1;
+    if (s->kind != DGM_LINE) continue;
+    dgm_line_ends(s, &x0, &y0, &x1, &y1);
+    drawio_style_extras(s, extras, sizeof extras, 1);
+    fprintf(f, "        <mxCell id=\"l%d\" style=\"endArrow=none;html=1;%s\" edge=\"1\" parent=\"1\">\n"
+               "          <mxGeometry relative=\"1\" as=\"geometry\">\n"
+               "            <mxPoint x=\"%d\" y=\"%d\" as=\"sourcePoint\" />\n"
+               "            <mxPoint x=\"%d\" y=\"%d\" as=\"targetPoint\" />\n"
+               "          </mxGeometry>\n"
+               "        </mxCell>\n",
+            i, extras,
+            x0 * DRAWIO_CW, y0 * DRAWIO_CH, x1 * DRAWIO_CW, y1 * DRAWIO_CH);
+  }
+
+  fprintf(f, "      </root>\n    </mxGraphModel>\n  </diagram>\n</mxfile>\n");
+  if (ferror(f)) { fclose(f); if (err) snprintf(err, errsz, "short write on %s", path); return -1; }
+  fclose(f);
+  return 0;
 }

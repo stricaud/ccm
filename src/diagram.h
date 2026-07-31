@@ -27,9 +27,9 @@
 #define DGM_W          512      /* canvas width  in cells */
 #define DGM_H          256      /* canvas height in cells */
 
-/* What an object *is*: a node (a shape with a label), a free-floating label, or
-   a connector between two of the others. */
-enum { DGM_NODE = 0, DGM_TEXT, DGM_CONN };
+/* What an object *is*: a node (a shape with a label), a free-floating label, a
+   connector between two of the others, or a plain line standing on its own. */
+enum { DGM_NODE = 0, DGM_TEXT, DGM_CONN, DGM_LINE };
 
 /* Which shape a node is drawn as. Every one of them lives in the same x/y/w/h
    rectangle, so moving, resizing, hit testing and connecting are shape-blind —
@@ -49,6 +49,13 @@ enum {
 
 enum { DGM_STYLE_ASCII = 0, DGM_STYLE_UNICODE };
 
+/* How a line or a link is stroked. Dashes and dots are drawn with the
+   characters themselves, so they survive into the saved ASCII; colour cannot,
+   and lives only on screen and in a .drawio export. */
+enum { DGM_SOLID = 0, DGM_DASHED, DGM_DOTTED, DGM_NSTROKES };
+
+#define DGM_COLOR_DEFAULT 0xff   /* "whatever the theme uses" */
+
 typedef struct {
   int  kind;                    /* DGM_NODE / DGM_TEXT / DGM_CONN             */
   int  shape;                   /* node: DGM_RECT, DGM_DIAMOND, …             */
@@ -56,6 +63,9 @@ typedef struct {
   char label[DGM_LABEL_MAX];    /* node/text content ('\n' separates lines)   */
   int  from, to;                /* connector: the two objects it joins        */
   int  arrow_from, arrow_to;    /* connector: arrowhead at either end         */
+  int  dir;                     /* line: 0 runs '\', 1 runs '/' across x/y/w/h */
+  int  fg, bg;                  /* ANSI colours, or DGM_COLOR_DEFAULT          */
+  int  stroke;                  /* DGM_SOLID / DGM_DASHED / DGM_DOTTED         */
 } dgm_shape_t;
 
 typedef struct {
@@ -66,8 +76,10 @@ typedef struct {
   int      has_raw;
 } dgm_doc_t;
 
-/* A rendered page of cells: `cell` is w*h codepoints, row-major, ' ' for empty. */
-typedef struct { uint32_t *cell; int w, h; } dgm_grid_t;
+/* A rendered page of cells: `cell` is w*h codepoints, row-major, ' ' for empty.
+   `fg`/`bg`, when non-NULL, are filled in alongside with each cell's colour (or
+   DGM_COLOR_DEFAULT) — the ASCII output ignores them, the screen does not. */
+typedef struct { uint32_t *cell; uint8_t *fg, *bg; int w, h; } dgm_grid_t;
 
 /* ── document ──────────────────────────────────────────────────────────────── */
 dgm_doc_t *dgm_new(void);                     /* zeroed doc, ASCII style */
@@ -77,6 +89,20 @@ void       dgm_clear(dgm_doc_t *d);
 /* Add a node of `shape`; w/h are grown to that shape's minimum if need be. */
 int  dgm_add_node(dgm_doc_t *d, int shape, int x, int y, int w, int h, const char *label);
 int  dgm_add_text(dgm_doc_t *d, int x, int y, const char *text);
+/* A plain line between two cells — an object like any other, so it can be
+   selected, moved, linked to and deleted. The far end is snapped to the
+   nearest horizontal, vertical or 45° run, which is what keeps it a clean
+   line of characters (and lets the recogniser find it again). */
+int  dgm_add_line(dgm_doc_t *d, int x0, int y0, int x1, int y1);
+/* The two ends of a line object, in drawing order. */
+void dgm_line_ends(const dgm_shape_t *s, int *x0, int *y0, int *x1, int *y1);
+/* Snap a far end to the nearest clean run — what dgm_add_line would do, so a
+   preview can show exactly the line that will be drawn. */
+void dgm_line_snap(int x0, int y0, int *x1, int *y1);
+/* Re-place an existing line's ends (used when dragging one of them). */
+void dgm_line_set(dgm_doc_t *d, int idx, int x0, int y0, int x1, int y1);
+/* The character a run in this direction is drawn with, for previews. */
+uint32_t dgm_line_glyph(int dx, int dy, int style);
 /* Join any two objects — nodes of any shape, and free text too. Two objects
    are either linked or not: asking again, in either direction, returns the link
    that is already there rather than stacking a second one on the same route. */
@@ -93,6 +119,11 @@ void dgm_shape_default(int shape, int *w, int *h);
 /* Display name ("Diamond") and a small preview for the palette, drawn with the
    same glyphs `style` would use on the canvas. */
 const char *dgm_shape_name(int shape);
+/* "solid" / "dashed" / "dotted". */
+const char *dgm_stroke_name(int stroke);
+/* Restyle an object: pass DGM_COLOR_DEFAULT to clear a colour, or -1 to leave
+   that attribute alone. */
+void dgm_set_style(dgm_doc_t *d, int idx, int fg, int bg, int stroke);
 const char *dgm_shape_sample(int shape, int style);
 int  dgm_duplicate(dgm_doc_t *d, int idx);   /* copy of a node/text, offset by 2,1 */
 /* Delete an object (and the connectors hanging off it). Indices of later
@@ -112,8 +143,12 @@ int dgm_hit(const dgm_doc_t *d, int x, int y);
    be clicked, deleted and re-pointed like any other object. */
 int dgm_hit_conn(const dgm_doc_t *d, int x, int y);
 enum { DGM_HIT_NONE = 0, DGM_HIT_INSIDE, DGM_HIT_BORDER, DGM_HIT_CORNER };
-/* Where (x, y) falls on shape `idx`: its interior (drag to move), its border
-   (drag to draw a connector) or its bottom-right corner (drag to resize). */
+/* Where (x, y) falls on object `idx`, and so what dragging there does:
+     DGM_HIT_CORNER  the bottom-right cell — resize (for a line, either end)
+     DGM_HIT_BORDER  one of the four edge-midpoint handles — draw a link
+     DGM_HIT_INSIDE  anywhere else on it — move the whole thing
+   Only the handles link, so dragging a side moves the object like any other
+   part of it. */
 int dgm_hit_part(const dgm_doc_t *d, int idx, int x, int y);
 /* Bounding box of everything drawn, including the raw layer. */
 void dgm_extent(const dgm_doc_t *d, int *w, int *h);
@@ -157,6 +192,13 @@ int dgm_flatten(dgm_doc_t *d, int idx, dgm_cell_t *undo, int max, int *nundo);
 uint32_t dgm_raw_get(const dgm_doc_t *d, int x, int y);
 /* Set (or, with 0, clear) one raw cell. Returns what was there before. */
 uint32_t dgm_raw_put(dgm_doc_t *d, int x, int y, uint32_t ch);
+
+/* ── draw.io ───────────────────────────────────────────────────────────────
+   The ASCII is the diagram's real home, but it has no colour and no notion of
+   a rhombus. Writing the same objects out as a .drawio file keeps all of it —
+   shapes, labels, links, colours, dashes — and opens in app.diagrams.net.
+   Returns 0 on success, filling `err` on failure. */
+int dgm_export_drawio(const dgm_doc_t *d, const char *path, char *err, size_t errsz);
 
 /* ── the mode (diagram.c) ──────────────────────────────────────────────────── */
 /* M-x diagram: open the current buffer's text as a diagram, full screen. */

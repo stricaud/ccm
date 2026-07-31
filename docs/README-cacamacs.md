@@ -175,6 +175,8 @@ key. `p` hides and shows the pane.
 | `t` | Text | a free-floating label, no outline |
 | `l` | Link | a connector between any two objects |
 | `e` | Eraser | rub out single characters |
+| `f` | Freehand | draw characters yourself (`Space` picks which) |
+| `-` | Line | a plain line, no arrowheads — an object like any other |
 
 After you place something, the tool returns to **Select** and the label editor
 opens, so the usual rhythm is: pick a shape, click, type, Enter. While the
@@ -190,8 +192,9 @@ Whichever of these feels natural works:
 
 - **Click, click** — press `l` for the Link tool, click one object, click the
   other. No dragging.
-- **Handles** — a selected object shows an `o` on each edge. Click one, then
-  click the object to link to; or drag from it straight onto that object.
+- **Handles** — a selected object shows an `o` at the middle of each edge. Click
+  one, then click the object to link to; or drag from it straight onto that
+  object.
 - **Keyboard** — select one (`Tab` cycles), press `c`, `Tab` to the other, press
   `Enter`.
 
@@ -202,6 +205,33 @@ removes it. Deleting an object deletes the links hanging off it.
 Two objects are either linked or they are not: asking for a link that already
 exists — in either direction — selects the one that is there instead of stacking
 a second, invisible one on the same route. Nothing links to itself.
+
+### Lines, freehand and style
+
+The **Line** tool (`-`) draws a plain line with no arrowheads. Drag from one end
+to the other; the far end snaps to the nearest horizontal, vertical or 45° run,
+which is what keeps it a clean row of characters. It is a real object — click it
+to select, drag it to move, drag either `o` end to re-aim it, `Del` to remove it
+— and reopening a file finds straight runs and hands them back as line objects.
+Use `l` instead when you want the two ends to *stay* attached to objects.
+
+The **Freehand** tool (`f`) is the opposite: it puts characters on the canvas
+one cell at a time and nothing owns them. `Space` cycles the character it draws
+with. Shapes are drawn on top of that background layer, so a stroke that runs
+under a box is kept but hidden.
+
+Anything selected can be restyled, and with nothing selected the same keys arm
+the style that everything you draw next will get:
+
+| key | what it changes |
+| --- | --- |
+| `C` | colour, from the toolkit's swatch dialog |
+| `B` | the background behind it |
+| `S` | solid → dashed → dotted |
+
+Dashes and dots are drawn with the characters themselves, so a dashed line is
+still dashed in the saved ASCII. Colour cannot survive plain text — see the
+draw.io export below.
 
 ### The eraser
 
@@ -220,12 +250,17 @@ demand for whatever is selected.
 
 | gesture | what it does |
 | --- | --- |
-| drag inside an object | move it |
-| drag its bottom-right corner (`#`) | resize it |
-| drag out from its edge, drop on another object | link the two |
-| click a link's line | select it |
+| drag anywhere on an object | move it |
+| drag its `#` bottom-right corner | resize it |
+| drag an `o` edge handle onto another object | link the two |
+| double-click an object | type its label, centred inside it |
+| click a link or a line | select it |
 | drag empty space | pan the canvas |
 | wheel | scroll |
+
+A selected object shows what each part does: `#` at the bottom right resizes,
+an `o` at the middle of each edge starts a link, and everywhere else — sides
+included — moves it.
 
 ### Keys
 
@@ -239,7 +274,10 @@ Edit     Ret edit the label (C-o adds a line, Ret commits, C-g cancels)
 Move     arrows move the selection — or the cursor, when nothing is selected
 Size     < > narrower / wider          [ ] shorter / taller
 Style    a cycle a link's arrowheads   s ASCII ↔ Unicode line drawing
+Draw     f freehand (Space picks the character)   - a plain line, no arrows
+Style    C colour   B background   S solid / dashed / dotted
 Erase    e eraser: rub out single characters   x object → plain characters
+Export   C-w write a .drawio copy that keeps the colours
 Leaving  q insert the diagram at the cursor and leave   Q leave it behind
          (then C-x C-s saves the buffer, C-/ undoes the insert)   ? help
 ```
@@ -255,6 +293,17 @@ Four shapes are ASCII in either mode — diamond, circle, cloud, hexagon and the
 actor are built from `/ \ < > ( ) ~`, which have no box-drawing equivalents, so
 they draw the same way in both.
 
+### Keeping the colours: a .drawio copy
+
+`C-w` writes the same objects out as a **draw.io** file (`.drawio`, mxGraph XML)
+next to the file you are editing. That copy keeps everything plain text cannot:
+colours, backgrounds, dash patterns, and each shape as a real shape — a diamond
+is a rhombus, a cylinder a cylinder, an actor a stick figure — with the links
+still joining the right two. Open it at app.diagrams.net.
+
+It is a *copy*, not a substitute: `q` still drops the ASCII into your document
+the same way, and the buffer is still saved with `C-x C-s`.
+
 ### Reopening a file
 
 There is no sidecar file and no metadata hidden in the art: reopening runs the
@@ -268,6 +317,9 @@ Two consequences worth knowing:
 
 - A link is redrawn by the router, so a hand-drawn line that wandered comes back
   as a tidy elbow between the same two objects.
+- Dashed and dotted lines come back as loose characters rather than line
+  objects: the recogniser looks for unbroken runs. They still draw and save
+  exactly as they were; they just are not draggable until redrawn.
 - Shapes drawn inside other shapes are not recognised as nested; the inner one
   is read as part of the outer one's label.
 
