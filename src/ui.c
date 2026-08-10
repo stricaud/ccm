@@ -131,6 +131,8 @@ const char *help_text(void)
   "         C-x o other window   C-x b switch buffer\n"
   "Files    C-x C-f find file   C-x C-s save   C-x C-w write-as   C-x C-c quit\n"
   "         C-x d directory browser\n"
+  "         the prompt starts on the current file: C-a C-e C-k M-DEL edit it,\n"
+  "         Tab completes, and Enter on a directory lists it\n"
   "View     C-x l line numbers   C-x f folding   C-x t toggle fold   C-x a annotate\n"
   "         C-x C-l line wrap (on by default)   C-x w whitespace   C-l recenter\n"
   "Pretty   C-x p pretty-print JSON/XML (auto: selection / buffer / line)\n"
@@ -242,9 +244,17 @@ int buffer_create(const char *path)
 {
   buffer_t *b;
   int bi, i;
+  char abs[PATH_MAX];
 
-  if (path) for (i = 0; i < g_nbuf; i++)
-    if (g_buffers[i].has_file && !strcmp(g_buffers[i].path, path)) return i;
+  /* Buffers hold absolute paths: `ccm file.txt` must still be able to show the
+     file it opened in the Find-file prompt, and it makes the reuse test below
+     see "file.txt" and "$PWD/file.txt" as the one buffer they are. */
+  if (path) {
+    ccm_abs_path(path, abs, sizeof abs);
+    path = abs;
+    for (i = 0; i < g_nbuf; i++)
+      if (g_buffers[i].has_file && !strcmp(g_buffers[i].path, path)) return i;
+  }
   if (g_nbuf >= MAXBUF) return -1;
   bi = g_nbuf++;
   b = &g_buffers[bi];

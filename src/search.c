@@ -140,6 +140,37 @@ void expand_tilde(const char *in, char *out, size_t outsz)
   else snprintf(out, outsz, "%s", in);
 }
 
+/* Absolute, canonical form of `in` — `~` expanded, relative paths joined onto
+   the process cwd.  realpath() is applied to the *directory* rather than the
+   whole path so that a file which does not exist yet still comes back absolute
+   (realpath fails on a missing leaf).  Anything that cannot be resolved is
+   returned as the plain cwd-joined form, which is still better than nothing. */
+void ccm_abs_path(const char *in, char *out, size_t outsz)
+{
+  char joined[PATH_MAX], resolved[PATH_MAX], cwd[PATH_MAX];
+  char *slash;
+
+  expand_tilde(in, joined, sizeof joined);
+  if (joined[0] != '/') {
+    char rel[PATH_MAX];
+    snprintf(rel, sizeof rel, "%s", joined);
+    if (getcwd(cwd, sizeof cwd)) snprintf(joined, sizeof joined, "%s/%s", cwd, rel);
+  }
+
+  if (ccm_realpath(joined, resolved)) { snprintf(out, outsz, "%s", resolved); return; }
+
+  /* Missing leaf: canonicalise the parent and re-attach the file name. */
+  slash = strrchr(joined, '/');
+  if (slash && slash != joined) {
+    char dir[PATH_MAX];
+    *slash = '\0';
+    snprintf(dir, sizeof dir, "%s", joined);
+    *slash = '/';
+    if (ccm_realpath(dir, resolved)) { snprintf(out, outsz, "%s/%s", resolved, slash + 1); return; }
+  }
+  snprintf(out, outsz, "%s", joined);
+}
+
 /* Tab completion for the path in the minibuffer (longest common prefix). */
 void minibuffer_complete_path(void)
 {
@@ -252,6 +283,9 @@ int minibuffer_key(int key)
     mb_status(); return 1;
   case CACA_KEY_HOME:  case 1 /* C-a */: g_mb_point = 0;       mb_status(); return 1;
   case CACA_KEY_END:   case 5 /* C-e */: g_mb_point = g_mb_len; mb_status(); return 1;
+  case 11 /* C-k */:                                                /* kill to end of the prompt */
+    g_mb_buf[g_mb_point] = '\0'; g_mb_len = g_mb_point;
+    mb_status(); return 1;
   case CACA_KEY_BACKSPACE:                                          /* delete whole char before point */
     if (g_mb_point > 0) {
       int start = g_mb_point - 1;
@@ -311,10 +345,11 @@ void find_file_done(const char *input)
 void start_find_file(void)
 {
   char defdir[PATH_MAX];
+  /* Seed with the whole path of the file on screen (buffer paths are absolute,
+     see buffer_create) so the prompt says which file you are starting from;
+     C-a C-k clears it, M-DEL walks back over the name a word at a time. */
   if (g_cur_buf >= 0 && g_buffers[g_cur_buf].has_file) {
-    char *s;
     strncpy(defdir, g_buffers[g_cur_buf].path, sizeof defdir - 1); defdir[sizeof defdir - 1] = '\0';
-    s = strrchr(defdir, '/'); if (s) s[1] = '\0'; else defdir[0] = '\0';
   } else if (g_curdir[0]) {
     snprintf(defdir, sizeof defdir, "%s/", g_curdir);
   } else {

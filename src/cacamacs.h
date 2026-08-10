@@ -176,6 +176,7 @@ void transpose_chars(gtcaca_editor_widget_t *ed);
 void yank(gtcaca_editor_widget_t *ed);
 /* search.c */
 void expand_tilde(const char *in, char *out, size_t outsz);
+void ccm_abs_path(const char *in, char *out, size_t outsz);
 void find_file_done(const char *input);
 int isearch_key(gtcaca_editor_widget_t *ed, int key);
 void isearch_redo(gtcaca_editor_widget_t *ed);
