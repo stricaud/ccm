@@ -47,6 +47,7 @@ done < <(ldd "$BIN")
 
 # Sample language extensions (highlighting) + the colour-theme sample.
 cp -R "$ROOT/examples/extensions" "$OUT/extensions" 2>/dev/null || true
+cp -R "$ROOT/themes" "$OUT/themes" 2>/dev/null || true
 cp "$ROOT/docs/ccm-theme.example" "$OUT/" 2>/dev/null || true
 
 cat > "$OUT/README.txt" <<'TXT'

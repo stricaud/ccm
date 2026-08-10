@@ -73,7 +73,7 @@ char *read_file(const char *path)
   return buf;
 }
 
-/* ── configuration (~/.ccm/cacamacs-config.json) ───────────────────────────────── */
+/* ── configuration (~/.cacamacs/config.json) ───────────────────────────────── */
 
 int _json_int(gtcaca_json_value *o, const char *key, int dflt)
 {
@@ -88,16 +88,10 @@ int _json_bool(gtcaca_json_value *o, const char *key, int dflt)
 
 void load_config(void)
 {
-  const char *home = getenv("HOME");
-  char path[1024];
+  char path[PATH_MAX];
   gtcaca_json_value *root, *langs;
-  if (!home) return;
-  snprintf(path, sizeof path, "%s/.ccm/cacamacs-config.json", home);
-  root = gtcaca_json_parse_file(path);
-  if (!root) {   /* fall back to the old location */
-    snprintf(path, sizeof path, "%s/.cacamacs/config.json", home);
-    root = gtcaca_json_parse_file(path);
-  }
+  if (!ccm_config_dir()[0]) return;
+  root = gtcaca_json_parse_file(ccm_config_path("config.json", path, sizeof path));
   if (!root) return;   /* keep built-in defaults */
 
   g_cfg_tab    = _json_int(root, "tabSize", g_cfg_tab);
@@ -272,7 +266,7 @@ const char *langid_from_ext(const char *ext)
 }
 
 /*
- * Look through ~/.ccm/extensions for a contributed language whose
+ * Look through ~/.cacamacs/extensions for a contributed language whose
  * `extensions` include the opened file's suffix, then load its `configuration`
  * (the language-configuration.json). Mirrors how VSCode resolves a language
  * from installed extensions.
@@ -281,7 +275,6 @@ const char *langid_from_ext(const char *ext)
 /* Extension roots, scanned in order. The first is cacamacs' own; the rest are
    real editor extension folders so installed VSCode extensions work directly. */
 static const char *g_ext_roots[] = {
-  "/.ccm/extensions",
   "/.cacamacs/extensions",
   "/.vscode/extensions",
   "/.vscode-oss/extensions",
@@ -398,7 +391,7 @@ gtcaca_editor_langcfg_t *discover_langcfg(const char *filename,
   const char *base = filename ? (strrchr(filename, '/') ? strrchr(filename, '/') + 1 : filename) : NULL;
   int r;
   if (!filename) return NULL;
-  /* The home-relative roots (~/.ccm, ~/.vscode, …) need $HOME; the builtin and
+  /* The home-relative roots (~/.cacamacs, ~/.vscode, …) need $HOME; the builtin and
      absolute roots below do not. Skipping only this loop when $HOME is unset
      (e.g. a native Windows process) still lets the shipped grammars load via
      CCM_BUILTIN_EXTENSIONS. */
@@ -564,6 +557,6 @@ void setup_language(gtcaca_editor_widget_t *ed, const char *filename,
 
   if (!g_grammar && !g_langcfg && ext)
     snprintf(g_message, sizeof g_message,
-             "No language for '%s' in ~/.ccm/extensions or the editor's built-ins — colourization off", ext);
+             "No language for '%s' in ~/.cacamacs/extensions or the editor's built-ins — colourization off", ext);
 }
 

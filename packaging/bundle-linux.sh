@@ -44,6 +44,7 @@ fi
 # VSCode installed (the wheel's shim points CCM_BUILTIN_EXTENSIONS here), plus
 # the colour-theme sample for reference.
 cp -R "$ROOT/examples/extensions" "$OUT/share/ccm/extensions" 2>/dev/null || true
+cp -R "$ROOT/themes" "$OUT/share/ccm/themes" 2>/dev/null || true
 cp "$ROOT/docs/ccm-theme.example" "$OUT/share/ccm/" 2>/dev/null || true
 
 # A shell launcher for the tarball users (the wheel replaces this with a Python

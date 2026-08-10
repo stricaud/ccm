@@ -1,6 +1,102 @@
 #include "cacamacs.h"
 #include <strings.h>   /* strcasecmp */
-/* ── per-user cacamacs colour theme (~/.ccm/theme) ──────────────────────────────
+
+/* ── where per-user configuration lives ─────────────────────────────────────────
+ *
+ * `~/.cacamacs/` on Unix, `%APPDATA%\cacamacs\` on Windows (falling back to
+ * `%USERPROFILE%` when APPDATA is unset, as it is for a service account).
+ * The theme, config.json and extensions/ all live there.
+ */
+#ifdef _WIN32
+#define CFG_SEP  "\\"
+#define CFG_DIR  "cacamacs"      /* under %APPDATA%, so no leading dot */
+#else
+#define CFG_SEP  "/"
+#define CFG_DIR  ".cacamacs"     /* a dotfile directory in $HOME */
+#endif
+
+const char *ccm_config_dir(void)
+{
+  static char dir[PATH_MAX];
+  static int  resolved = 0;
+  const char *base;
+
+  if (resolved) return dir;
+  resolved = 1;
+#ifdef _WIN32
+  base = getenv("APPDATA");
+  if (!base || !*base) base = getenv("USERPROFILE");
+#else
+  base = getenv("HOME");
+#endif
+  if (base && *base) snprintf(dir, sizeof dir, "%s" CFG_SEP CFG_DIR, base);
+  return dir;
+}
+
+/* Where cacamacs' *shipped* data lives — the sample extensions and the default
+   theme it installs alongside its binary, as opposed to the user's own files.
+   $CCM_DATA_DIR wins; otherwise the parent of $CCM_BUILTIN_EXTENSIONS (the pip
+   wheel's launcher already points that at the bundle); otherwise it is derived
+   from the running executable, which is what makes a relocatable bundle find
+   its own data instead of a prefix frozen in at build time. */
+const char *ccm_data_dir(void)
+{
+  static char dir[PATH_MAX];
+  static int  resolved = 0;
+  const char *env;
+
+  if (resolved) return dir;
+  resolved = 1;
+
+  env = getenv("CCM_DATA_DIR");
+  if (env && *env) { snprintf(dir, sizeof dir, "%s", env); return dir; }
+
+  env = getenv("CCM_BUILTIN_EXTENSIONS");
+  if (env && *env) {                       /* .../share/ccm/extensions -> .../share/ccm */
+    const char *cut = strrchr(env, '/');
+#ifdef _WIN32
+    const char *bs = strrchr(env, '\\');
+    if (bs && (!cut || bs > cut)) cut = bs;
+#endif
+    if (cut && cut != env) { snprintf(dir, sizeof dir, "%.*s", (int)(cut - env), env); return dir; }
+  }
+
+#ifdef GTCACA_HAVE_THEME_SEARCH
+  env = gtcaca_executable_dir();
+  if (env && *env) {
+    char cand[PATH_MAX];
+    struct stat st;
+    /* The Windows bundle is flat — data sits beside the exe; everywhere else it
+       is the usual bin/ + share/ pair. */
+    snprintf(cand, sizeof cand, "%s" CFG_SEP "themes", env);
+    if (stat(cand, &st) == 0 && S_ISDIR(st.st_mode)) { snprintf(dir, sizeof dir, "%s", env); return dir; }
+    snprintf(dir, sizeof dir, "%s" CFG_SEP ".." CFG_SEP "share" CFG_SEP "ccm", env);
+  }
+#endif
+  return dir;
+}
+
+/* Absolute path of the configuration file `leaf`. Returned whether or not it
+   exists — a caller that finds nothing there names it in its "not found"
+   message, which is also where the file should be created. */
+const char *ccm_config_path(const char *leaf, char *out, size_t outsz)
+{
+  snprintf(out, outsz, "%s" CFG_SEP "%s", ccm_config_dir(), leaf);
+  return out;
+}
+
+/* Did the shipped themes/default actually make it into this install? */
+int ccm_default_theme_present(void)
+{
+  char path[PATH_MAX];
+  struct stat st;
+  const char *data = ccm_data_dir();
+  if (!data[0]) return 0;
+  snprintf(path, sizeof path, "%s" CFG_SEP "themes" CFG_SEP "default", data);
+  return stat(path, &st) == 0 && !S_ISDIR(st.st_mode);
+}
+
+/* ── per-user cacamacs colour theme (~/.cacamacs/theme) ─────────────────────────
  *
  * A small INI-ish file:  key = colour   (# starts a comment)
  *
@@ -97,14 +193,13 @@ static char *trim(char *s)
 
 void ccm_theme_load(void)
 {
-  const char *home = getenv("HOME");
   char path[PATH_MAX], line[256], badbuf[120] = "";
   int  nbad = 0, lineno = 0;
   FILE *f;
 
   memset(&T, 0, sizeof T);
-  if (!home) return;
-  snprintf(path, sizeof path, "%s/.ccm/theme", home);
+  if (!ccm_config_dir()[0]) return;
+  ccm_config_path("theme", path, sizeof path);
   f = fopen(path, "r");
   if (!f) return;
 
@@ -149,7 +244,7 @@ void ccm_theme_load(void)
   T.loaded = 1;
 
   if (nbad)     /* stash the mistake; shown once the UI is up (see ccm_theme_show_warning) */
-    snprintf(g_theme_warn, sizeof g_theme_warn, "~/.ccm/theme: %s%s", badbuf, nbad > 1 ? "  (+ more)" : "");
+    snprintf(g_theme_warn, sizeof g_theme_warn, "%s: %s%s", path, badbuf, nbad > 1 ? "  (+ more)" : "");
 }
 
 /* Put any theme-file warning on the status line. Call it last in startup, after

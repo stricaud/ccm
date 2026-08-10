@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>      /* struct winsize, TIOCGWINSZ — POSIX only */
 #endif
 #include <unistd.h>
+#include <fcntl.h>          /* open() — muting fd 2 across gtcaca_init */
 #include <limits.h>
 #include <caca.h>
 #include <gtcaca/main.h>
@@ -200,7 +201,11 @@ void start_query_replace_regexp(void);
 void spell_word(gtcaca_editor_widget_t *ed);
 int  spell_key(gtcaca_editor_widget_t *ed, int key);
 
-/* theme.c — per-user colour theme (~/.ccm/theme) */
+/* theme.c — per-user configuration dir and colour theme (~/.cacamacs/theme) */
+const char *ccm_config_dir(void);
+const char *ccm_config_path(const char *leaf, char *out, size_t outsz);
+const char *ccm_data_dir(void);
+int  ccm_default_theme_present(void);
 void ccm_theme_load(void);
 void ccm_theme_apply_global(void);
 void ccm_theme_apply_editor(gtcaca_editor_widget_t *ed);

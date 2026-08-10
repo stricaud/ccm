@@ -130,6 +130,12 @@ endif()
 
 install(TARGETS ccm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-# The colour-theme sample, so a fresh install has something to seed ~/.ccm/theme.
+# The colour-theme sample, so a fresh install has something to seed
+# ~/.cacamacs/theme.
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/ccm-theme.example"
         DESTINATION "${CMAKE_INSTALL_DATADIR}/ccm")
+
+# cacamacs' own default theme. gtcaca picks it up from here (see ccm_data_dir)
+# and layers it over its own, so the editor looks right with no per-user setup.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/themes/default"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/ccm/themes")

@@ -3,7 +3,7 @@
  *           with Emacs key bindings.
  *
  * Usage:
- *   cacamacs [file | directory] [+N] [language-configuration.json]
+ *   cacamacs [options] [file | directory] [+N]      (see --help, or usage())
  *   (+N opens the file at line N, e.g.  ccm file.c +123)
  *
  * Given a directory (or C-x d), a file browser opens: Up/Down to move, Enter to
@@ -39,6 +39,7 @@
  */
 
 #include "cacamacs.h"
+#include <getopt.h>   /* getopt_long — POSIX systems and mingw-w64 alike */
 
 /* global definitions (declared extern in cacamacs.h) */
 char g_message[128] = "";   /* status-line message; shared with games.c */
@@ -142,49 +143,142 @@ static void run_test(void)
 #define CCM_VERSION_STR "0.0.0"
 #endif
 
+/* ── startup diagnostics ──────────────────────────────────────────────────────
+ *
+ * gtcaca_init() greets every run with
+ *
+ *     No theme file found at <prefix>/share/gtcaca//themes/default, using
+ *     built-in defaults.
+ *
+ * because gtcaca resolves its theme against the GTCACA_DATA_DIR that was baked
+ * in when the *library* was compiled. For a relocatable build — the pip wheel,
+ * the .pkg — that directory is the machine it was built on, so the line names a
+ * CI runner's work tree and the file is never there. cacamacs does not use
+ * gtcaca's ini themes at all (its own live in ~/.cacamacs/theme, see theme.c),
+ * so the note is noise on a screen that is about to be cleared anyway.
+ *
+ * Mute fd 2 for the duration of init unless --warnings asked to see it. The
+ * only other thing gtcaca writes there is its "cannot create display" error,
+ * which always comes with a negative return, so restore the descriptor first
+ * and report that failure ourselves — nothing diagnostic is lost.
+ */
+static int g_warnings = 0;
+
+static int init_gtcaca(int *argc, char ***argv)
+{
+  int saved = -1, rc;
+
+  if (!g_warnings) {
+#ifdef _WIN32
+    int null_fd = open("NUL", O_WRONLY);
+#else
+    int null_fd = open("/dev/null", O_WRONLY);
+#endif
+    if (null_fd >= 0) { saved = dup(2); dup2(null_fd, 2); close(null_fd); }
+  }
+
+  rc = gtcaca_init(argc, argv);
+
+  if (saved >= 0) { dup2(saved, 2); close(saved); }
+  if (rc < 0 && !g_warnings)
+    fprintf(stderr, "ccm: cannot start the display — re-run with --warnings to see why\n");
+  return rc;
+}
+
+static void usage(FILE *out)
+{
+  const char *cfg = ccm_config_dir();
+  fprintf(out,
+    "Usage: ccm [options] [file | directory] [+LINE]\n"
+    "\n"
+    "A small terminal text editor with Emacs key bindings. Given a directory\n"
+    "(or C-x d once running) it opens a file browser instead.\n"
+    "\n"
+    "  -h, --help       show this help and exit\n"
+    "  -v, --version    show the version and exit\n"
+    "  -w, --warnings   let library start-up warnings through to stderr\n"
+    "      --test       run the built-in self-test and exit\n"
+    "\n"
+    "  +LINE            open the file at that line, e.g.  ccm file.c +123\n"
+    "\n"
+    "Per-user configuration lives in %s:\n"
+    "  theme            colours — see docs/ccm-theme.example\n"
+    "  config.json      tab size, indentation, per-language overrides\n"
+    "  extensions/      VSCode-style grammars driving syntax colourization\n"
+    "\n"
+    "Inside the editor, M-x help lists every key binding.\n",
+    cfg[0] ? cfg : "~/.cacamacs");
+}
+
 int main(int argc, char **argv)
 {
-  int cw, ch, i, b0;
-  const char *arg = argc > 1 ? argv[1] : NULL;
+  static const struct option LONGOPTS[] = {
+    { "help",     no_argument, NULL, 'h' },
+    { "version",  no_argument, NULL, 'v' },
+    { "warnings", no_argument, NULL, 'w' },
+    { "test",     no_argument, NULL, 't' },   /* long-form only */
+    { NULL,       0,           NULL,  0  }
+  };
+  int cw, ch, i, b0, c, selftest = 0;
+  const char *arg = NULL;
   const char *open_file_path = NULL;
   int open_dir = 0;
   long goto_line_arg = 0;
 
-  /* --version / -v: print and exit *before* opening any display. This is also
-     the packaging smoke test's entry point — the OS resolves ccm's whole
-     dylib/DLL closure (gtcaca, libcaca, oniguruma) at load, before main runs,
-     so reaching this line already proves the libraries resolved; then we exit
-     cleanly with no TUI left running to orphan a CI runner. */
-  if (arg && (!strcmp(arg, "--version") || !strcmp(arg, "-v"))) {
-    printf("ccm (cacamacs) %s\n", CCM_VERSION_STR);
-    return 0;
+  /* Options are settled before any display is opened, so --version and --help
+     print and exit cleanly. --version is also the packaging smoke test's entry
+     point: the OS resolves ccm's whole dylib/DLL closure (gtcaca, libcaca,
+     oniguruma) at load, before main runs, so merely reaching it proves the
+     libraries resolved — and it leaves no TUI behind to orphan a CI runner. */
+  while ((c = getopt_long(argc, argv, "hvw", LONGOPTS, NULL)) != -1) {
+    switch (c) {
+    case 'h': usage(stdout); return 0;
+    case 'v': printf("ccm (cacamacs) %s\n", CCM_VERSION_STR); return 0;
+    case 'w': g_warnings = 1; break;
+    case 't': selftest = 1;   break;
+    default:  usage(stderr);  return 2;
+    }
   }
 
-  gtcaca_init(&argc, &argv);
-  if (arg && !strcmp(arg, "--test")) { run_test(); caca_free_display(gmo.dp); return 0; }
-  { const char *m = getenv("CCM_BOTTOM_MARGIN"); int mv = m ? atoi(m) : 0;
-    if (mv > 0) g_bottom_reserve = mv; }
-  /* Emacs-like editor colours: a near-black background with light-grey text,
-     the same whether or not the pane is focused (focus is shown by the cursor,
-     not a background tint). The cyan statusbar is left as-is. */
-  gmo.theme.textviewfocus.bg = CACA_BLACK;
-  gmo.theme.textviewfocus.fg = CACA_LIGHTGRAY;
-  gmo.theme.textview.bg      = CACA_BLACK;
-  gmo.theme.textview.fg      = CACA_LIGHTGRAY;
-  gtcaca_application_new("cacamacs");
-  load_config();
-  ccm_theme_load();          /* ~/.ccm/theme overrides the defaults above */
-  ccm_theme_apply_global();  /* tint the editor surface before editors exist */
-
-  /* args: a file/dir plus an optional "+N" line number (vim/less style), e.g.
-     `ccm file.c +123`. The +N may appear before or after the path. */
-  arg = NULL;
-  for (i = 1; i < argc; i++) {
+  /* What is left is a path plus an optional "+N" line number (vim/less style);
+     the +N may come before or after the path. */
+  for (i = optind; i < argc; i++) {
     if (argv[i][0] == '+' && argv[i][1] >= '0' && argv[i][1] <= '9')
       goto_line_arg = strtol(argv[i] + 1, NULL, 10);
     else if (!arg)
       arg = argv[i];
   }
+
+  /* cacamacs ships its own default theme (themes/default, installed as
+     <data dir>/themes/default). Registering the directory before init makes
+     gtcaca layer it over gtcaca's own default, so ours only has to name the
+     colours that differ — and the user's ~/.config/gtcaca theme still wins over
+     both. Must come before gtcaca_init(), which is where themes are read. */
+#ifdef GTCACA_HAVE_THEME_SEARCH
+  gtcaca_theme_add_search_dir(ccm_data_dir());
+  if (g_warnings) gtcaca_theme_set_verbose(1);
+#endif
+
+  if (init_gtcaca(&argc, &argv) < 0) return 1;
+  if (selftest) { run_test(); caca_free_display(gmo.dp); return 0; }
+  { const char *m = getenv("CCM_BOTTOM_MARGIN"); int mv = m ? atoi(m) : 0;
+    if (mv > 0) g_bottom_reserve = mv; }
+  /* Fallback for an install whose themes/default is missing (a hand-copied
+     binary, a stripped package): keep the Emacs-like editing surface — near
+     black with light-grey text, unchanged by focus — that the theme file
+     otherwise supplies. Skipped when the file was there, so a user editing it
+     is not silently overruled a moment later. */
+  if (!ccm_default_theme_present()) {
+    gmo.theme.textviewfocus.bg = CACA_BLACK;
+    gmo.theme.textviewfocus.fg = CACA_LIGHTGRAY;
+    gmo.theme.textview.bg      = CACA_BLACK;
+    gmo.theme.textview.fg      = CACA_LIGHTGRAY;
+  }
+  gtcaca_application_new("cacamacs");
+  load_config();
+  ccm_theme_load();          /* ~/.cacamacs/theme overrides the defaults above */
+  ccm_theme_apply_global();  /* tint the editor surface before editors exist */
+
   if (arg) {
     struct stat st;
     if (stat(arg, &st) == 0 && S_ISDIR(st.st_mode)) open_dir = 1;
@@ -291,7 +385,7 @@ int main(int argc, char **argv)
   }
 
   gtcaca_set_paste_cb(ccm_paste, NULL);   /* a paste is one edit, not 150k keys */
-  ccm_theme_show_warning();   /* surface any ~/.ccm/theme mistake (last, so it sticks) */
+  ccm_theme_show_warning();   /* surface any ~/.cacamacs/theme mistake (last, so it sticks) */
   gtcaca_main();
 
   buffer_store_globals(g_cur_buf);

@@ -8,7 +8,7 @@
 #   lib/libcaca.0.dylib            bundled      (so Homebrew is NOT required)
 #   share/ccm/ccm-theme.example    the colour-theme sample
 #
-# A postinstall script then seeds ~/.ccm/theme for the installing user from that
+# A postinstall script then seeds ~/.cacamacs/theme for the installing user from that
 # sample (only if they don't already have one, so it never clobbers).
 #
 # Unlike the old gtcaca-tree packager, this one does not assume gtcaca was built
@@ -72,11 +72,11 @@ install_name_tool -add_rpath @executable_path/../lib "$DEST/bin/ccm" 2>/dev/null
 echo ">> verifying the staged binary resolves only @rpath + system libs"
 otool -L "$DEST/bin/ccm" | sed 's/^/   /'
 
-# postinstall: seed ~/.ccm/theme for the installing user (never clobber)
+# postinstall: seed ~/.cacamacs/theme for the installing user (never clobber)
 SCRIPTS="$(mktemp -d)"
 cat > "$SCRIPTS/postinstall" <<'POST'
 #!/bin/sh
-# Give the installing user a starter ~/.ccm/theme from the bundled sample, but
+# Give the installing user a starter ~/.cacamacs/theme from the bundled sample, but
 # only if they don't already have one. Runs as root, so target the real user.
 set -e
 EXAMPLE="/usr/local/share/ccm/ccm-theme.example"
@@ -89,11 +89,11 @@ home="$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $
 [ -n "$home" ] || home="$(eval echo "~$user")"
 [ -n "$home" ] && [ -d "$home" ] || exit 0
 
-theme="$home/.ccm/theme"
+theme="$home/.cacamacs/theme"
 if [ ! -e "$theme" ] && [ -f "$EXAMPLE" ]; then
-  mkdir -p "$home/.ccm"
+  mkdir -p "$home/.cacamacs"
   cp "$EXAMPLE" "$theme"
-  chown "$user" "$home/.ccm" "$theme" 2>/dev/null || true
+  chown "$user" "$home/.cacamacs" "$theme" 2>/dev/null || true
 fi
 exit 0
 POST

@@ -98,13 +98,20 @@ neither Homebrew nor a system gtcaca:
 scripts/package-macos.sh          # → ccm-<version>.pkg
 ```
 
-Its postinstall seeds `~/.ccm/theme` from the bundled sample (never clobbering
+Its postinstall seeds `~/.cacamacs/theme` from the bundled sample (never clobbering
 an existing one).
 
 ## Configuration
 
-- **Colour theme** — copy [docs/ccm-theme.example](docs/ccm-theme.example) to
-  `~/.ccm/theme`. Comments in the file explain every key.
+Per-user files live in `~/.cacamacs/` (`%APPDATA%\cacamacs\` on Windows).
+
+- **Syntax colours** — copy [docs/ccm-theme.example](docs/ccm-theme.example) to
+  `~/.cacamacs/theme`. Comments in the file explain every key.
+- **Window chrome** — the editing surface, status bar and dialogs come from
+  gtcaca's theme system, in layers: gtcaca's own default, then cacamacs'
+  ([themes/default](themes/default), installed to `share/ccm/themes/default`),
+  then your `~/.config/gtcaca/themes/default`. Each layer only has to name the
+  colours it changes. `ccm --warnings` reports where they were looked for.
 - **Editor config** — copy [examples/config.json](examples/config.json) to
   `~/.cacamacs/config.json` for tab size, indent, per-language overrides.
 - **Language extensions** — the VSCode-style grammar/config bundles under
