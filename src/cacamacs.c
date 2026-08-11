@@ -43,7 +43,10 @@
 #include <errno.h>    /* strerror, for --configure's failure messages */
 
 /* global definitions (declared extern in cacamacs.h) */
-char g_message[128] = "";   /* status-line message; shared with games.c */
+char g_message[320] = "";   /* status-line message; shared with games.c.
+                               Wide enough for a completion candidate list — the
+                               point of the shared md- prefix is that `M-x md-`
+                               Tab shows the whole set. */
 gtcaca_editor_widget_t    *g_ed       = NULL;   /* focused editor       */
 gtcaca_statusbar_widget_t *g_modeline = NULL;
 gtcaca_window_widget_t    *g_win      = NULL;   /* focused pane window  */

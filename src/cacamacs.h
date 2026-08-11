@@ -141,7 +141,7 @@ extern int   g_prefix_reading;
 extern int   g_prefix_pending;
 extern int   g_prefix_have;
 extern long  g_prefix_arg;
-extern char g_message[128];
+extern char g_message[320];
 extern int  g_bottom_reserve;   /* rows kept clear above the status bar */
 extern int g_isearch;
 extern int g_qr_active;          /* query-replace stepping is in progress */
@@ -156,6 +156,20 @@ void run_sokoban(void);
 /* edit.c */
 void case_word(gtcaca_editor_widget_t *ed, int upper);
 void comment_dwim(gtcaca_editor_widget_t *ed);
+/* markdown.c — M-x md-… helpers for writing markdown */
+void md_title(gtcaca_editor_widget_t *ed);
+void md_subtitle(gtcaca_editor_widget_t *ed);
+void md_heading(gtcaca_editor_widget_t *ed, int level);
+void md_list(gtcaca_editor_widget_t *ed);
+void md_ordered(gtcaca_editor_widget_t *ed);
+void md_quote(gtcaca_editor_widget_t *ed);
+void md_task(gtcaca_editor_widget_t *ed);
+void md_bold(gtcaca_editor_widget_t *ed);
+void md_italic(gtcaca_editor_widget_t *ed);
+void md_strike(gtcaca_editor_widget_t *ed);
+void md_code(gtcaca_editor_widget_t *ed);
+void md_link(gtcaca_editor_widget_t *ed);
+void md_hr(gtcaca_editor_widget_t *ed);
 void copy_region(gtcaca_editor_widget_t *ed);
 const char *current_line_comment(void);
 void exchange_point_and_mark(gtcaca_editor_widget_t *ed);

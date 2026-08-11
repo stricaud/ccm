@@ -86,7 +86,7 @@ static void (*g_mb_cb)(const char *) = NULL;
 /* Render the prompt + text with a caret bar (▏) drawn at point. */
 void mb_status(void)
 {
-  char shown[200];
+  char shown[288];
   int p = g_mb_point; if (p < 0) p = 0; if (p > g_mb_len) p = g_mb_len;
   snprintf(shown, sizeof shown, "%.*s\xe2\x96\x8f%s", p, g_mb_buf, g_mb_buf + p);
   snprintf(g_message, sizeof g_message, "%s%s", g_mb_prompt, shown);
@@ -214,7 +214,16 @@ static const char *g_mx_commands[] = { "help", "diagram", "undo", "redo",
                                        "snake", "sokoban", "describe-bindings",
                                        "query-replace", "query-replace-regexp",
                                        "replace-string", "goto-line",
-                                       "json-pretty-print", "xml-pretty-print", NULL };
+                                       "json-pretty-print", "xml-pretty-print",
+                                       /* markdown: one prefix, so `M-x md-` Tab
+                                          lists every one of them */
+                                       "md-title", "md-subtitle",
+                                       "md-h1", "md-h2", "md-h3",
+                                       "md-h4", "md-h5", "md-h6",
+                                       "md-bold", "md-italic", "md-code",
+                                       "md-strike", "md-link",
+                                       "md-list", "md-ordered", "md-task",
+                                       "md-quote", "md-hr", NULL };
 
 void minibuffer_complete_command(void)
 {
@@ -232,7 +241,7 @@ void minibuffer_complete_command(void)
   g_mb_len = (int)strlen(g_mb_buf);
   if (n == 1) { mb_status(); return; }
   {                                              /* several: show the candidates */
-    char list[160] = ""; size_t off = 0; int k;
+    char list[288] = ""; size_t off = 0; int k;
     for (k = 0; k < n && off < sizeof list - 1; k++)
       off += (size_t)snprintf(list + off, sizeof list - off, "%s%s", k ? "  " : "", matches[k]);
     snprintf(g_message, sizeof g_message, "%s%s   {%s}", g_mb_prompt, g_mb_buf, list);
@@ -534,8 +543,23 @@ void mx_done(const char *cmd)
     pretty_print_json_line(g_ed);
   else if (!strcmp(cmd, "xml-pretty-print"))
     pretty_print_xml_line(g_ed);
+  /* markdown helpers — all md-*, so `M-x md-` and Tab shows the set */
+  else if (!strcmp(cmd, "md-title"))    md_title(g_ed);
+  else if (!strcmp(cmd, "md-subtitle")) md_subtitle(g_ed);
+  else if (!strncmp(cmd, "md-h", 4) && cmd[4] >= '1' && cmd[4] <= '6' && !cmd[5])
+    md_heading(g_ed, cmd[4] - '0');
+  else if (!strcmp(cmd, "md-bold"))     md_bold(g_ed);
+  else if (!strcmp(cmd, "md-italic"))   md_italic(g_ed);
+  else if (!strcmp(cmd, "md-code"))     md_code(g_ed);
+  else if (!strcmp(cmd, "md-strike"))   md_strike(g_ed);
+  else if (!strcmp(cmd, "md-link"))     md_link(g_ed);
+  else if (!strcmp(cmd, "md-list"))     md_list(g_ed);
+  else if (!strcmp(cmd, "md-ordered"))  md_ordered(g_ed);
+  else if (!strcmp(cmd, "md-task"))     md_task(g_ed);
+  else if (!strcmp(cmd, "md-quote"))    md_quote(g_ed);
+  else if (!strcmp(cmd, "md-hr"))       md_hr(g_ed);
   else if (cmd[0])
-    snprintf(g_message, sizeof g_message, "No command: %s  (try: help, diagram, undo, redo, json-pretty-print)", cmd);
+    snprintf(g_message, sizeof g_message, "No command: %s  (try: help, diagram, md-title, undo)", cmd);
 }
 void start_mx(void) { start_minibuffer_init("M-x ", mx_done, 2, NULL); }  /* 2 = command completion */
 

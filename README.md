@@ -101,6 +101,15 @@ scripts/package-macos.sh          # → ccm-<version>.pkg
 Its postinstall seeds `~/.cacamacs/theme` from the bundled sample (never clobbering
 an existing one).
 
+## Markdown
+
+`M-x md-` then Tab lists a set of helpers for writing prose — `md-title` and
+`md-subtitle` underline a line with `===` / `---`, `md-h1`…`md-h6` make `#`
+headings, `md-bold` / `md-italic` / `md-code` / `md-strike` / `md-link` mark up
+the region or the word at point, and `md-list` / `md-ordered` / `md-task` /
+`md-quote` / `md-hr` handle the block-level bits. Each is its own inverse. See
+[docs/README-cacamacs.md](docs/README-cacamacs.md#markdown--m-x-md).
+
 ## Configuration
 
 Per-user files live in `~/.cacamacs/` (`%APPDATA%\cacamacs\` on Windows).

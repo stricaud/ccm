@@ -58,6 +58,39 @@ JSON     C-x p pretty-print (.json/.jsonl open in JSON mode automatically)
 Complete Tab (after a word)  — Up/Down choose, Enter/Tab accept, Esc cancel
 ```
 
+## Markdown — `M-x md-…`
+
+Helpers for writing prose. They all share the `md-` prefix, so `M-x md-` and
+Tab lists the set. Each acts on the region when there is one and on the current
+line or the word at point otherwise, and each is its own inverse — run it twice
+and the markup comes back off.
+
+| Command | Does |
+|---|---|
+| `md-title` | underlines the line with `=` (setext H1) |
+| `md-subtitle` | underlines it with `-` (setext H2) |
+| `md-h1` … `md-h6` | `#`-prefixed heading; the same level again removes it |
+| `md-bold` / `md-italic` / `md-strike` | wrap in `**` / `*` / `~~` |
+| `md-code` | inline `` ` `` — or a ``` fence when the region spans lines |
+| `md-link` | `[text](url)`, leaving point where the URL goes |
+| `md-list` / `md-ordered` / `md-task` | prefix the lines with `- `, `1. `, `- [ ] ` |
+| `md-quote` | prefix the lines with `> ` |
+| `md-hr` | a `---` rule on a line of its own |
+
+So for the common case: type your title, then `M-x md-title`:
+
+```
+My Document          My Document
+                ->   ===========
+```
+
+The underline is as long as the title *in characters*, so accented text lines
+up. An underline already under the line is replaced rather than stacked, which
+is what lets `md-title` and `md-subtitle` change a heading's level.
+
+`md-ordered` renumbers the whole range from 1, so it also fixes a list whose
+numbering has drifted.
+
 ## Configuration — `~/.cacamacs/config.json`
 
 `ccm --configure` writes this file for you, with every setting at its built-in

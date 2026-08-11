@@ -137,6 +137,12 @@ const char *help_text(void)
   "         C-x C-l line wrap (on by default)   C-x w whitespace   C-l recenter\n"
   "Pretty   C-x p pretty-print JSON/XML (auto: selection / buffer / line)\n"
   "         M-x json-pretty-print · xml-pretty-print (current line)\n"
+  "Markdown M-x md-<Tab> lists them all. On the region, else the line or word;\n"
+  "         each one run twice takes the markup back off.\n"
+  "         md-title / md-subtitle  underline the line with === or ---\n"
+  "         md-h1 … md-h6  # headings    md-hr  horizontal rule\n"
+  "         md-bold  md-italic  md-code  md-strike  md-link\n"
+  "         md-list  md-ordered  md-task  md-quote\n"
   "Diagram  M-x diagram  draw an ASCII diagram and drop it in at the cursor\n"
   "         (select existing art first to edit it; q inserts, then C-x C-s)\n"
   "         shapes, links, an eraser — ? inside the mode lists every key\n"
@@ -194,7 +200,7 @@ void browser_open_current(void)
 /* Modeline shown while the browser is focused. */
 void browser_modeline(gtcaca_editor_widget_t *ed, void *ud)
 {
-  char t[256], dirbuf[128];
+  char t[512], dirbuf[128];
   /* Keep the command hints visible: cap the directory to half the bar (the
      path is the browser's main content, so it gets a bigger budget than the
      editor's file name). */

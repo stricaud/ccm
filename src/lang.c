@@ -28,7 +28,7 @@ const char *compact_path(const char *s, char *out, size_t outsz, int maxw)
 
 void refresh_modeline(gtcaca_editor_widget_t *ed, void *ud)
 {
-  char text[256], namebuf[128];
+  char text[512], namebuf[128];
   int line = gtcaca_editor_get_current_line(ed) + 1;
   int col  = gtcaca_editor_get_column(ed, gtcaca_editor_get_current_pos(ed)) + 1;
   /* Budget the name to a third of the bar (clamped), leaving the rest for the
