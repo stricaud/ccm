@@ -4,6 +4,8 @@
   "insertSpaces": true,
   "indentSize": 4,
   "edgeColumn": 80,
+  "//logFiles": "true appends every file opened/written to ~/.cacamacs/files.log",
+  "logFiles": false,
   "languages": {
     ".py": { "tabSize": 4, "insertSpaces": true, "indentSize": 4 },
     ".c":  { "insertSpaces": false, "tabSize": 8 },

@@ -277,6 +277,11 @@ int buffer_create(const char *path)
     gtcaca_editor_set_text(b->ed, c ? c : ""); free(c);
     strncpy(b->path, path, sizeof b->path - 1); b->path[sizeof b->path - 1] = '\0';
     b->has_file = 1;
+    /* Here rather than in the callers: every route to a file — the command
+       line, C-x C-f, the browser, a pane split — lands in buffer_create, and
+       the early return above means a buffer that is merely revisited is not
+       logged a second time. */
+    ccm_log_file('O', b->path);
   }
   gtcaca_editor_empty_undo_buffer(b->ed);
   gtcaca_editor_set_save_point(b->ed);
@@ -543,6 +548,10 @@ void save_as_done(const char *input)
   else if (input[0] == '/') snprintf(path, sizeof path, "%s", input);
   else if (g_curdir[0]) snprintf(path, sizeof path, "%s/%s", g_curdir, input);
   else snprintf(path, sizeof path, "%s", input);
+  /* Canonicalise before it becomes the buffer's path: buffers carry absolute
+     paths (see buffer_create), and the Find-file prompt, the modeline and the
+     file log all read them back. */
+  { char abs[PATH_MAX]; ccm_abs_path(path, abs, sizeof abs); snprintf(path, sizeof path, "%s", abs); }
 
   len = gtcaca_editor_get_length(g_ed);
   buf = malloc((size_t)len + 1);
@@ -567,6 +576,7 @@ void save_as_done(const char *input)
   buffer_store_globals(g_cur_buf);
 
   gtcaca_editor_set_save_point(g_ed);
+  ccm_log_file('W', b->path);   /* b->path, not `path`: the canonical absolute form */
   snprintf(g_message, sizeof g_message, "Wrote %s", path);
 }
 

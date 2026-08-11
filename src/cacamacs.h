@@ -29,6 +29,14 @@
 #include <gtcaca/json.h>
 #include <gtcaca/clipboard.h>
 
+/* mkdir(2) takes a mode; the MSVC-flavoured _mkdir does not. */
+#ifdef _WIN32
+#include <direct.h>
+#define ccm_mkdir(p) _mkdir(p)
+#else
+#define ccm_mkdir(p) mkdir((p), 0700)
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -114,6 +122,8 @@ extern int                        g_n_keywords;
 extern int                        g_folding;
 extern int             g_cfg_tab, g_cfg_spaces, g_cfg_indent;
 extern int             g_cfg_edge;
+extern int             g_cfg_logfiles;   /* "logFiles": append to files.log */
+void ccm_log_file(char op, const char *path);   /* op: 'O' opened, 'W' wrote */
 extern lang_override_t g_overrides[32];
 extern int             g_noverrides;
 extern int             g_tab_size, g_insert_spaces, g_indent_size;

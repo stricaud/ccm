@@ -60,6 +60,11 @@ Complete Tab (after a word)  — Up/Down choose, Enter/Tab accept, Esc cancel
 
 ## Configuration — `~/.cacamacs/config.json`
 
+`ccm --configure` writes this file for you, with every setting at its built-in
+default and a one-line description beside each, so there is something to edit
+rather than a blank page. It creates `~/.cacamacs/` if needed and never
+overwrites an existing config — move the old one aside first.
+
 Controls indentation, with optional per-extension overrides:
 
 ```json
@@ -67,6 +72,8 @@ Controls indentation, with optional per-extension overrides:
   "tabSize": 4,
   "insertSpaces": true,
   "indentSize": 4,
+  "edgeColumn": 80,
+  "logFiles": false,
   "languages": {
     ".py": { "tabSize": 4, "insertSpaces": true, "indentSize": 4 },
     ".c":  { "insertSpaces": false, "tabSize": 8 }
@@ -77,7 +84,32 @@ Controls indentation, with optional per-extension overrides:
 - `tabSize` — display width of a tab.
 - `insertSpaces` — Tab inserts spaces (true) or a real tab (false).
 - `indentSize` — number of spaces inserted when `insertSpaces` is true.
+- `edgeColumn` — column to draw the edge/ruler marker at (0 = off).
+- `logFiles` — boolean, `false` unless set. See below.
 - `languages` — overrides keyed by file extension (merged over the globals).
+
+### File log — `logFiles`
+
+With `"logFiles": true`, cacamacs appends a line to `~/.cacamacs/files.log`
+every time it opens or writes a file, so you can look back over what you worked
+on:
+
+```
+[2026-08-10 21:17:12] O /home/you/src/parser.c
+[2026-08-10 21:19:44] W /home/you/src/parser.c
+```
+
+`O` is an open, `W` a write. Paths are absolute regardless of the directory ccm
+was started in, and the timestamp is local time.
+
+Every route in is covered — a file named on the command line, `C-x C-f`, and
+picking one out of the browser (`C-x d`, or `ccm <directory>`) — as is every
+route out: `C-x C-s` and `C-x C-w`. Reopening a file already held in a buffer
+does not log a second time; nothing was read from disk.
+
+The log is only ever appended to, and never rotated or pruned — it is yours to
+trim. cacamacs never reports a failure to write it: if the file cannot be
+opened, the line is dropped and editing carries on.
 
 A ready-to-copy sample is in
 [examples/cacamacs-config.json](../examples/cacamacs-config.json). (Indentation

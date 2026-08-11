@@ -191,17 +191,29 @@ static char *trim(char *s)
   return s;
 }
 
-void ccm_theme_load(void)
+/* Is `k` one of gtcaca's chrome keys — <widget>_bg / <widget>_fg?
+   The two theme layers are one file each, read twice: gtcaca takes the chrome
+   keys out of them and cacamacs takes the syntax colours, each ignoring what
+   the other owns. Without this test every chrome line in the file would be
+   reported as an unknown setting. cacamacs' own selection_bg / selection_fg
+   end the same way, but they are matched before this is ever consulted. */
+static int is_chrome_key(const char *k)
 {
-  char path[PATH_MAX], line[256], badbuf[120] = "";
-  int  nbad = 0, lineno = 0;
-  FILE *f;
+  size_t n = strlen(k);
+  if (n < 4) return 0;
+  return !strcasecmp(k + n - 3, "_bg") || !strcasecmp(k + n - 3, "_fg");
+}
 
-  memset(&T, 0, sizeof T);
-  if (!ccm_config_dir()[0]) return;
-  ccm_config_path("theme", path, sizeof path);
-  f = fopen(path, "r");
-  if (!f) return;
+/* Apply one theme file over whatever is already in T; keys it does not mention
+   keep their current value, which is what makes the layers stack. Returns 0 if
+   the file is not there. */
+static int theme_parse_file(const char *path)
+{
+  char line[256], badbuf[120] = "";
+  int  nbad = 0, lineno = 0;
+  FILE *f = fopen(path, "r");
+
+  if (!f) return 0;
 
   while (fgets(line, sizeof line, f)) {
     char *p = line, *eq, *k, *v, *c;
@@ -238,13 +250,40 @@ void ccm_theme_load(void)
     else if (!strcasecmp(k, "selection_bg") || !strcasecmp(k, "selectionbg") || !strcasecmp(k, "selection")) T.sel_bg = col;
     else if (!strcasecmp(k, "current_line") || !strcasecmp(k, "currentline") || !strcasecmp(k, "cursorline")) T.curline = col;
     else known = 0;
-    if (!known && !nbad++) snprintf(badbuf, sizeof badbuf, "line %d: unknown setting \"%s\"", lineno, k);
+    if (!known && !is_chrome_key(k) && !nbad++)
+      snprintf(badbuf, sizeof badbuf, "line %d: unknown setting \"%s\"", lineno, k);
   }
   fclose(f);
-  T.loaded = 1;
 
-  if (nbad)     /* stash the mistake; shown once the UI is up (see ccm_theme_show_warning) */
+  /* First mistake wins: an earlier layer's warning is not worth losing to a
+     later file that happens to be clean. */
+  if (nbad && !g_theme_warn[0])
     snprintf(g_theme_warn, sizeof g_theme_warn, "%s: %s%s", path, badbuf, nbad > 1 ? "  (+ more)" : "");
+  return 1;
+}
+
+/* The colours cacamacs draws with, in layers — the theme cacamacs ships, then
+   the user's own file over it, so a personal theme only has to name what it
+   changes. Both are read by the same parser; the shipped one is the same file
+   gtcaca reads its chrome out of, which is what lets a single themes/default
+   carry the window colours and the syntax colours together. */
+void ccm_theme_load(void)
+{
+  char path[PATH_MAX];
+  int  got = 0;
+
+  memset(&T, 0, sizeof T);
+  g_theme_warn[0] = '\0';
+
+  if (ccm_data_dir()[0]) {
+    snprintf(path, sizeof path, "%s" CFG_SEP "themes" CFG_SEP "default", ccm_data_dir());
+    got |= theme_parse_file(path);
+  }
+  if (ccm_config_dir()[0]) {
+    ccm_config_path("theme", path, sizeof path);
+    got |= theme_parse_file(path);
+  }
+  T.loaded = got;
 }
 
 /* Put any theme-file warning on the status line. Call it last in startup, after

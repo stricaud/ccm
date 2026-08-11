@@ -634,6 +634,7 @@ void save_file(gtcaca_editor_widget_t *ed)
   free(buf);
 
   gtcaca_editor_set_save_point(ed);
+  ccm_log_file('W', g_filename);
   snprintf(g_message, sizeof(g_message), "Wrote %s", g_filename);
 }
 

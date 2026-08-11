@@ -40,6 +40,7 @@
 
 #include "cacamacs.h"
 #include <getopt.h>   /* getopt_long — POSIX systems and mingw-w64 alike */
+#include <errno.h>    /* strerror, for --configure's failure messages */
 
 /* global definitions (declared extern in cacamacs.h) */
 char g_message[128] = "";   /* status-line message; shared with games.c */
@@ -75,6 +76,7 @@ int                        g_n_keywords = 0;
 int                        g_folding = 0;         /* folding mode on? */
 int             g_cfg_tab = 8, g_cfg_spaces = 1, g_cfg_indent = 2;   /* global defaults */
 int             g_cfg_edge = 0;                                       /* edge/ruler column */
+int             g_cfg_logfiles = 0;   /* off unless config.json says otherwise */
 lang_override_t g_overrides[32];
 int             g_noverrides = 0;
 int             g_tab_size = 8, g_insert_spaces = 1, g_indent_size = 2; /* effective */
@@ -185,6 +187,79 @@ static int init_gtcaca(int *argc, char ***argv)
   return rc;
 }
 
+/* --configure: drop a fully populated config.json into the configuration
+   directory, so there is something to edit rather than a blank page and a
+   README.
+
+   Every value is read out of the live globals rather than restated as a literal
+   here. Restating them is exactly how a "default configuration" file drifts
+   away from the actual defaults: this runs before load_config(), so the globals
+   still hold what cacamacs starts from.
+
+   An existing file is never overwritten — a hand-tuned configuration is not
+   something to lose to a mistyped flag. */
+static int write_default_config(void)
+{
+  char path[PATH_MAX];
+  const char *dir = ccm_config_dir();
+  struct stat st;
+  FILE *f;
+
+  if (!dir[0]) {
+    fprintf(stderr, "ccm: no home directory to write a configuration into\n");
+    return 1;
+  }
+  if (stat(dir, &st) != 0 && ccm_mkdir(dir) != 0) {
+    fprintf(stderr, "ccm: cannot create %s: %s\n", dir, strerror(errno));
+    return 1;
+  }
+  ccm_config_path("config.json", path, sizeof path);
+  if (stat(path, &st) == 0) {
+    fprintf(stderr, "ccm: %s already exists — move it aside to write a fresh one\n", path);
+    return 1;
+  }
+  f = fopen(path, "w");
+  if (!f) {
+    fprintf(stderr, "ccm: cannot write %s: %s\n", path, strerror(errno));
+    return 1;
+  }
+
+  /* JSON has no comments, so the descriptions ride along as "//<key>" entries;
+     load_config only looks up the keys it knows, and ignores these. */
+  fprintf(f,
+    "{\n"
+    "  \"//\": \"cacamacs configuration — every setting at its built-in default\",\n"
+    "\n"
+    "  \"//tabSize\": \"display width of a tab\",\n"
+    "  \"tabSize\": %d,\n"
+    "\n"
+    "  \"//insertSpaces\": \"Tab inserts spaces (true) or a real tab (false)\",\n"
+    "  \"insertSpaces\": %s,\n"
+    "\n"
+    "  \"//indentSize\": \"spaces inserted per level when insertSpaces is true\",\n"
+    "  \"indentSize\": %d,\n"
+    "\n"
+    "  \"//edgeColumn\": \"column to mark with the edge ruler; 0 turns it off\",\n"
+    "  \"edgeColumn\": %d,\n"
+    "\n"
+    "  \"//logFiles\": \"append every file opened (O) and written (W) to files.log\",\n"
+    "  \"logFiles\": %s,\n"
+    "\n"
+    "  \"//languages\": \"per-extension overrides of the three indent settings,\",\n"
+    "  \"//languages ex\": \"e.g. \\\".c\\\": { \\\"insertSpaces\\\": false, \\\"tabSize\\\": 8 }\",\n"
+    "  \"languages\": {}\n"
+    "}\n",
+    g_cfg_tab, g_cfg_spaces ? "true" : "false", g_cfg_indent,
+    g_cfg_edge, g_cfg_logfiles ? "true" : "false");
+
+  if (ferror(f) || fclose(f) != 0) {
+    fprintf(stderr, "ccm: failed writing %s\n", path);
+    return 1;
+  }
+  printf("Wrote %s\n", path);
+  return 0;
+}
+
 static void usage(FILE *out)
 {
   const char *cfg = ccm_config_dir();
@@ -197,13 +272,16 @@ static void usage(FILE *out)
     "  -h, --help       show this help and exit\n"
     "  -v, --version    show the version and exit\n"
     "  -w, --warnings   let library start-up warnings through to stderr\n"
+    "      --configure  write a default config.json and exit (never overwrites)\n"
     "      --test       run the built-in self-test and exit\n"
     "\n"
     "  +LINE            open the file at that line, e.g.  ccm file.c +123\n"
     "\n"
     "Per-user configuration lives in %s:\n"
     "  theme            colours — see docs/ccm-theme.example\n"
-    "  config.json      tab size, indentation, per-language overrides\n"
+    "  config.json      tab size, indentation, per-language overrides;\n"
+    "                   \"logFiles\": true also records every file opened and\n"
+    "                   written to files.log in the same directory\n"
     "  extensions/      VSCode-style grammars driving syntax colourization\n"
     "\n"
     "Inside the editor, M-x help lists every key binding.\n",
@@ -215,8 +293,9 @@ int main(int argc, char **argv)
   static const struct option LONGOPTS[] = {
     { "help",     no_argument, NULL, 'h' },
     { "version",  no_argument, NULL, 'v' },
-    { "warnings", no_argument, NULL, 'w' },
-    { "test",     no_argument, NULL, 't' },   /* long-form only */
+    { "warnings",  no_argument, NULL, 'w' },
+    { "configure", no_argument, NULL, 'C' },  /* long-form only */
+    { "test",      no_argument, NULL, 't' },  /* long-form only */
     { NULL,       0,           NULL,  0  }
   };
   int cw, ch, i, b0, c, selftest = 0;
@@ -235,6 +314,7 @@ int main(int argc, char **argv)
     case 'h': usage(stdout); return 0;
     case 'v': printf("ccm (cacamacs) %s\n", CCM_VERSION_STR); return 0;
     case 'w': g_warnings = 1; break;
+    case 'C': return write_default_config();
     case 't': selftest = 1;   break;
     default:  usage(stderr);  return 2;
     }

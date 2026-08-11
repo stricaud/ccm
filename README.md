@@ -105,15 +105,24 @@ an existing one).
 
 Per-user files live in `~/.cacamacs/` (`%APPDATA%\cacamacs\` on Windows).
 
-- **Syntax colours** — copy [docs/ccm-theme.example](docs/ccm-theme.example) to
-  `~/.cacamacs/theme`. Comments in the file explain every key.
-- **Window chrome** — the editing surface, status bar and dialogs come from
-  gtcaca's theme system, in layers: gtcaca's own default, then cacamacs'
-  ([themes/default](themes/default), installed to `share/ccm/themes/default`),
-  then your `~/.config/gtcaca/themes/default`. Each layer only has to name the
-  colours it changes. `ccm --warnings` reports where they were looked for.
-- **Editor config** — copy [examples/config.json](examples/config.json) to
-  `~/.cacamacs/config.json` for tab size, indent, per-language overrides.
+- **Colours** — [themes/default](themes/default) (installed as
+  `share/ccm/themes/default`) is cacamacs' theme, and `~/.cacamacs/theme` is
+  applied over it, so a personal theme only names what it changes. Start from
+  [docs/ccm-theme.example](docs/ccm-theme.example).
+
+  A theme file carries two kinds of key, and is read twice — once by each half:
+  `<widget>_bg` / `<widget>_fg` are the window chrome, which gtcaca layers over
+  its own default; everything else (`background`, `comment`, `keyword`,
+  `selection_bg`, …) is the editing surface and syntax colours, which cacamacs
+  reads. Each parser ignores the other's keys, so both can live in one file.
+  `ccm --warnings` reports where themes were looked for.
+- **Editor config** — run `ccm --configure` to write `~/.cacamacs/config.json`
+  with every setting at its default (tab size, indent, per-language overrides),
+  annotated and ready to edit. It never overwrites an existing one.
+- **File log** — `"logFiles": true` in that file appends one line per file
+  opened (`O`) or written (`W`) to `~/.cacamacs/files.log`, so you can look back
+  over what you worked on. Off by default; see
+  [docs/README-cacamacs.md](docs/README-cacamacs.md#file-log--logfiles).
 - **Language extensions** — the VSCode-style grammar/config bundles under
   [examples/extensions/](examples/extensions/) drive syntax colourization.
 

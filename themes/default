@@ -1,34 +1,34 @@
 [gtcaca_theme]
-# cacamacs' own default theme.
+# cacamacs' default theme.
 #
-# gtcaca loads its own themes/default first and then layers this file over it
-# (cacamacs registers this directory with gtcaca_theme_add_search_dir), so only
-# the colours that differ from gtcaca's need naming here — everything left out
-# keeps whatever gtcaca chose. A user's ~/.config/gtcaca/themes/default is
-# applied after this one and wins over both.
+# One file, read by two parsers, each taking the half it owns:
 #
-# This file colours the *chrome*: windows, buttons, the status bar, the editing
-# surface. Syntax colours — comment, string, keyword, selection, current line —
-# live in ~/.cacamacs/theme instead; see docs/ccm-theme.example.
+#   <widget>_bg / <widget>_fg   the window chrome — read by gtcaca, layered
+#                               over gtcaca's own themes/default, so only the
+#                               colours that differ need naming here.
+#   everything else             the editing surface and syntax colours — read
+#                               by cacamacs (src/theme.c).
 #
-# Colour names: black blue green cyan red magenta brown lightgray darkgray
-# lightblue lightgreen lightcyan lightred lightmagenta yellow white.
+# ~/.cacamacs/theme is applied over this one in exactly the same way, so a
+# personal theme only has to name what it changes. Keep the [gtcaca_theme]
+# header on the first line: gtcaca needs it, and cacamacs ignores it.
+#
+# Chrome colours are the 16 terminal names: black blue green cyan red magenta
+# brown lightgray darkgray lightblue lightgreen lightcyan lightred
+# lightmagenta yellow white. The cacamacs half additionally takes #rrggbb,
+# #rgb and rgb(r,g,b), rendered in up to 4096 colours where the terminal
+# allows and falling back to the nearest of the 16 where it does not.
 
-# An Emacs-like editing surface: near-black with light-grey text, and the same
-# whether or not the pane holds focus — focus is shown by the cursor, not by a
-# background tint. (gtcaca brightens the focused textview to white; cacamacs
-# deliberately does not.)
+# ── the editing surface ─────────────────────────────────────────────────────
+# background/foreground also set gtcaca's textview pair, so the editor looks
+# the same focused or not — focus is shown by the cursor, not a background tint.
 background   = #1e1a2e        # a dark purple
 foreground   = #d0d0e0
 current_line = #2a2440        # highlight on the caret's line
 selection_fg = black
 selection_bg = #4a4a80
-textview_bg      = black
-textview_fg      = lightgray
-textviewfocus_bg = black
-textviewfocus_fg = lightgray
 
-# code colourization (syntax styles)
+# ── syntax colours ──────────────────────────────────────────────────────────
 comment  = #6a7a6a
 string   = #98c878
 number   = #80d0d0
@@ -36,3 +36,8 @@ keyword  = #c890f0
 bracket  = #e0e0a0
 operator = #b0b0c0
 
+# ── window chrome (gtcaca's half) ───────────────────────────────────────────
+# Uncomment to move away from gtcaca's blue-desktop defaults, e.g.
+# statusbar_bg = blue
+# statusbar_fg = white
+# windowfocus_fg = yellow

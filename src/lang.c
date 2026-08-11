@@ -98,6 +98,7 @@ void load_config(void)
   g_cfg_spaces = _json_bool(root, "insertSpaces", g_cfg_spaces);
   g_cfg_indent = _json_int(root, "indentSize", g_cfg_indent);
   g_cfg_edge   = _json_int(root, "edgeColumn", g_cfg_edge);
+  g_cfg_logfiles = _json_bool(root, "logFiles", g_cfg_logfiles);
 
   /* per-language overrides keyed by file extension, e.g. ".py": { ... } */
   langs = gtcaca_json_object_get(root, "languages");
@@ -116,6 +117,48 @@ void load_config(void)
     }
   }
   gtcaca_json_free(root);
+}
+
+/* ── file log (~/.cacamacs/files.log) ────────────────────────────────────────
+ *
+ * Off unless "logFiles": true is set in config.json. One line per event:
+ *
+ *     [2026-08-10 11:42:07] O /home/you/src/parser.c
+ *     [2026-08-10 11:58:31] W /home/you/src/parser.c
+ *
+ * O when a file is opened, W when one is written — so the log reads as a
+ * history of what you worked on and what you changed. Paths are absolute (see
+ * ccm_abs_path), which keeps the log meaningful no matter which directory ccm
+ * was started from, and greppable across sessions.
+ *
+ * Opened and closed per line rather than held: an editor is killed far more
+ * often than it exits, and a buffered handle loses the tail of the log when it
+ * is. A failure to write is ignored — a log nobody asked to read is never worth
+ * interrupting an edit for.
+ */
+void ccm_log_file(char op, const char *path)
+{
+  char logpath[PATH_MAX], stamp[32];
+  time_t now;
+  struct tm tmv;
+  FILE *f;
+
+  if (!g_cfg_logfiles || !path || !*path) return;
+  if (!ccm_config_dir()[0]) return;
+
+  now = time(NULL);
+#ifdef _WIN32
+  { struct tm *p = localtime(&now); if (!p) return; tmv = *p; }
+#else
+  if (!localtime_r(&now, &tmv)) return;
+#endif
+  if (!strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tmv)) return;
+
+  ccm_config_path("files.log", logpath, sizeof logpath);
+  f = fopen(logpath, "a");
+  if (!f) return;              /* no config dir yet, read-only home, … — never fatal */
+  fprintf(f, "[%s] %c %s\n", stamp, op, path);
+  fclose(f);
 }
 
 /* Compute the effective indentation for a file extension and apply tab width. */

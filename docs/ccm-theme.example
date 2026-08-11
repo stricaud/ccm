@@ -1,5 +1,10 @@
 # cacamacs colour theme — copy to ~/.cacamacs/theme
 #
+# This file is applied over the theme cacamacs ships (share/ccm/themes/default),
+# so it only needs the colours you want changed; anything left out keeps the
+# shipped value. The same file may also carry gtcaca's <widget>_bg / <widget>_fg
+# keys for the window chrome — see themes/default in the source tree.
+#
 # Syntax:  key = colour          (everything after a "  #" is a comment)
 #
 # Colours may be names (the 16 below), HTML hex (#rrggbb / #rgb), or rgb(r,g,b).
