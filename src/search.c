@@ -215,6 +215,7 @@ static const char *g_mx_commands[] = { "help", "diagram", "undo", "redo",
                                        "query-replace", "query-replace-regexp",
                                        "replace-string", "goto-line",
                                        "json-pretty-print", "xml-pretty-print",
+                                       "insert-date", "insert-time",
                                        /* markdown: one prefix, so `M-x md-` Tab
                                           lists every one of them */
                                        "md-title", "md-subtitle",
@@ -543,6 +544,10 @@ void mx_done(const char *cmd)
     pretty_print_json_line(g_ed);
   else if (!strcmp(cmd, "xml-pretty-print"))
     pretty_print_xml_line(g_ed);
+  else if (!strcmp(cmd, "insert-date"))
+    insert_date(g_ed);
+  else if (!strcmp(cmd, "insert-time"))
+    insert_time(g_ed);
   /* markdown helpers — all md-*, so `M-x md-` and Tab shows the set */
   else if (!strcmp(cmd, "md-title"))    md_title(g_ed);
   else if (!strcmp(cmd, "md-subtitle")) md_subtitle(g_ed);

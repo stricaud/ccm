@@ -173,6 +173,8 @@ void md_hr(gtcaca_editor_widget_t *ed);
 void copy_region(gtcaca_editor_widget_t *ed);
 const char *current_line_comment(void);
 void exchange_point_and_mark(gtcaca_editor_widget_t *ed);
+void insert_date(gtcaca_editor_widget_t *ed);   /* M-x insert-date  YYYY-MM-DD */
+void insert_time(gtcaca_editor_widget_t *ed);   /* M-x insert-time  + HH:MM:SS */
 void keyboard_quit(gtcaca_editor_widget_t *ed);
 void kill_line(gtcaca_editor_widget_t *ed);
 void kill_region(gtcaca_editor_widget_t *ed);

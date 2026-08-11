@@ -137,6 +137,7 @@ const char *help_text(void)
   "         C-x C-l line wrap (on by default)   C-x w whitespace   C-l recenter\n"
   "Pretty   C-x p pretty-print JSON/XML (auto: selection / buffer / line)\n"
   "         M-x json-pretty-print · xml-pretty-print (current line)\n"
+  "Insert   M-x insert-date  2026-08-11      M-x insert-time  + 14:03:27\n"
   "Markdown M-x md-<Tab> lists them all. On the region, else the line or word;\n"
   "         each one run twice takes the markup back off.\n"
   "         md-title / md-subtitle  underline the line with === or ---\n"

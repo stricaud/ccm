@@ -226,6 +226,38 @@ void comment_dwim(gtcaca_editor_widget_t *ed)
            do_comment ? "Commented" : "Uncommented", last - first + 1, last == first ? "" : "s");
 }
 
+/* ── M-x insert-date / insert-time ─────────────────────────────────────────────
+ *
+ * ISO 8601 order, "2026-08-11" and "2026-08-11 14:03:27", in local time. Sorts
+ * correctly as text, which is the point of writing a date this way round.
+ * Inserted at point; a region is left alone, only deselected.
+ */
+static void insert_stamp(gtcaca_editor_widget_t *ed, const char *fmt)
+{
+  char stamp[64];
+  time_t now = time(NULL);
+  struct tm tmv;
+  int pos;
+  size_t n;
+
+#ifdef _WIN32
+  { struct tm *p = localtime(&now); if (!p) return; tmv = *p; }
+#else
+  if (!localtime_r(&now, &tmv)) return;
+#endif
+  n = strftime(stamp, sizeof stamp, fmt, &tmv);
+  if (n == 0) return;
+
+  pos = gtcaca_editor_get_current_pos(ed);
+  gtcaca_editor_insert_text(ed, pos, stamp);
+  gtcaca_editor_set_empty_selection(ed, pos + (int)n);
+  g_mark_active = 0;
+  snprintf(g_message, sizeof g_message, "Inserted %s", stamp);
+}
+
+void insert_date(gtcaca_editor_widget_t *ed) { insert_stamp(ed, "%Y-%m-%d"); }
+void insert_time(gtcaca_editor_widget_t *ed) { insert_stamp(ed, "%Y-%m-%d %H:%M:%S"); }
+
 /* show-paren: highlight the brace under/just-before the caret and its match. */
 void show_paren(gtcaca_editor_widget_t *ed)
 {
