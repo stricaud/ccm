@@ -26,6 +26,44 @@ const char *compact_path(const char *s, char *out, size_t outsz, int maxw)
   return out;
 }
 
+/* Keep the fold structure in step with edits — but only with edits.
+ *
+ * This runs from the update callback, which fires for caret movement just as
+ * much as for typing, and folding is a whole-document pass: on a 10MB JSON file
+ * it costs ~265ms, so every arrow key paid for re-folding 216k lines that had
+ * not changed. Fold only when the text actually changed since the last fold.
+ *
+ * The signature is gtcaca's edit counter where the library provides one, and
+ * the document's length and line count otherwise — the fallback misses an edit
+ * that alters neither (overtyping one character), which is why the counter is
+ * preferred; it exists for exactly this. */
+static void refold_if_edited(gtcaca_editor_widget_t *ed)
+{
+  static unsigned long other_sig;      /* editors with no buffer: browser, help */
+  unsigned long *seen = &other_sig, sig;
+  int json = gtcaca_editor_get_json_mode(ed), i;
+
+  if (!json && !g_folding) return;
+
+#ifdef GTCACA_HAVE_EDIT_COUNT
+  sig = (unsigned long)gtcaca_editor_get_edit_count(ed);
+#else
+  sig = (unsigned long)gtcaca_editor_get_length(ed) * 31u
+      + (unsigned long)gtcaca_editor_get_line_count(ed);
+#endif
+  /* Per buffer, so that switching windows does not re-fold a document whose
+     folds are still perfectly good. Stored as sig+1, leaving 0 to mean "never
+     folded" — an untouched buffer's edit count is legitimately 0. */
+  for (i = 0; i < g_nbuf; i++)
+    if (g_buffers[i].ed == ed) { seen = &g_buffers[i].fold_sig; break; }
+
+  if (*seen == sig + 1) return;
+  *seen = sig + 1;
+
+  if (json) gtcaca_editor_fold_json(ed);
+  else      gtcaca_editor_fold_by_indentation(ed);
+}
+
 void refresh_modeline(gtcaca_editor_widget_t *ed, void *ud)
 {
   char text[512], namebuf[128];
@@ -43,9 +81,7 @@ void refresh_modeline(gtcaca_editor_widget_t *ed, void *ud)
 
   (void)ud;
   show_paren(ed);
-  /* keep fold structure in step with edits */
-  if (gtcaca_editor_get_json_mode(ed)) gtcaca_editor_fold_json(ed);
-  else if (g_folding)                  gtcaca_editor_fold_by_indentation(ed);
+  refold_if_edited(ed);
   if (g_message[0])
     snprintf(text, sizeof(text), " %s %s  (%s)  L%d C%d   %s", mod, name, g_langname, line, col, g_message);
   else

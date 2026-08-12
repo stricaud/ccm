@@ -74,6 +74,7 @@ typedef struct {
   int                      n_keywords;
   int                      folding;
   int                      pane;
+  unsigned long            fold_sig;   /* edit count when last folded, +1 (0 = never) */
 } buffer_t;
 
 typedef struct {
