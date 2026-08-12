@@ -201,12 +201,18 @@ void minibuffer_complete_path(void)
   need = snprintf(g_mb_buf, sizeof g_mb_buf, "%s%s", dir, common);
   if (need < 0 || need >= (int)sizeof g_mb_buf) return;
   g_mb_len = (int)strlen(g_mb_buf);
+  /* Point follows the completed text — and must be set before mb_status, which
+     draws the caret where g_mb_point says, not at the end of the buffer. */
   if (nmatch == 1) {                          /* unique: add '/' if a directory */
     char full[PATH_MAX]; struct stat st;
     expand_tilde(g_mb_buf, full, sizeof full);
     if (stat(full, &st) == 0 && S_ISDIR(st.st_mode) && g_mb_len + 1 < (int)sizeof g_mb_buf) { g_mb_buf[g_mb_len++] = '/'; g_mb_buf[g_mb_len] = '\0'; }
+    g_mb_point = g_mb_len;                    /* after the '/', ready for the next name */
     mb_status();
-  } else snprintf(g_message, sizeof g_message, "%s%s   (%d matches)", g_mb_prompt, g_mb_buf, nmatch);
+  } else {
+    g_mb_point = g_mb_len;
+    snprintf(g_message, sizeof g_message, "%s%s   (%d matches)", g_mb_prompt, g_mb_buf, nmatch);
+  }
 }
 
 /* M-x command names offered by completion (aliases still run, see mx_done) */
@@ -240,6 +246,7 @@ void minibuffer_complete_command(void)
   for (i = 1; i < n; i++) { int j = 0; while (common[j] && matches[i][j] == common[j]) j++; common[j] = '\0'; }
   strncpy(g_mb_buf, common, sizeof g_mb_buf - 1); g_mb_buf[sizeof g_mb_buf - 1] = '\0';
   g_mb_len = (int)strlen(g_mb_buf);
+  g_mb_point = g_mb_len;                      /* see minibuffer_complete_path */
   if (n == 1) { mb_status(); return; }
   {                                              /* several: show the candidates */
     char list[288] = ""; size_t off = 0; int k;
@@ -355,11 +362,17 @@ void find_file_done(const char *input)
 void start_find_file(void)
 {
   char defdir[PATH_MAX];
-  /* Seed with the whole path of the file on screen (buffer paths are absolute,
-     see buffer_create) so the prompt says which file you are starting from;
-     C-a C-k clears it, M-DEL walks back over the name a word at a time. */
+  /* Seed with the directory holding the current file, not the file itself: the
+     usual reason to open the prompt is to reach a *sibling* of what is on
+     screen, so the useful thing to leave under the caret is the folder, ready
+     for a name or for Tab. Buffer paths are absolute (see buffer_create), so
+     the directory is always there to take — the earlier version cut at the last
+     '/' and left the prompt empty for a file opened as `ccm notes.txt`. */
   if (g_cur_buf >= 0 && g_buffers[g_cur_buf].has_file) {
+    char *slash;
     strncpy(defdir, g_buffers[g_cur_buf].path, sizeof defdir - 1); defdir[sizeof defdir - 1] = '\0';
+    slash = strrchr(defdir, '/');
+    if (slash) slash[1] = '\0';           /* keep the '/', drop the file name */
   } else if (g_curdir[0]) {
     snprintf(defdir, sizeof defdir, "%s/", g_curdir);
   } else {
