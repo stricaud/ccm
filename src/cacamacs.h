@@ -63,6 +63,11 @@ static inline char *ccm_realpath(const char *path, char *resolved) {
 #define MAXNODES  (2 * MAXLEAVES)
 #define MACRO_MAX 8192
 
+/* A file's modification time as we last knew it (Emacs' buffer-file-modtime);
+   exists = 0 records "the file was not there", as for a buffer visiting a name
+   that does not exist yet. See lock.c. */
+typedef struct { int exists; time_t sec; long nsec; long long size; } ccm_stamp_t;
+
 typedef struct {
   gtcaca_editor_widget_t  *ed;
   char                     path[PATH_MAX];
@@ -75,6 +80,8 @@ typedef struct {
   int                      folding;
   int                      pane;
   unsigned long            fold_sig;   /* edit count when last folded, +1 (0 = never) */
+  ccm_stamp_t              stamp;      /* the file as of visiting it / last saving it */
+  int                      was_modified; /* modify flag at the last modeline refresh */
 } buffer_t;
 
 typedef struct {
@@ -148,6 +155,7 @@ extern int g_isearch;
 extern int g_qr_active;          /* query-replace stepping is in progress */
 extern int g_spell_active;       /* spell-check suggestion picker is up */
 extern int g_mb_active;
+extern int g_super_active;       /* the "changed on disk; really edit?" question is up */
 
 /* games (games.c) */
 void run_snake(void);
@@ -192,6 +200,7 @@ void pretty_print_json_line(gtcaca_editor_widget_t *ed);
 void pretty_print_xml_line(gtcaca_editor_widget_t *ed);
 void recenter(gtcaca_editor_widget_t *ed);
 void save_file(gtcaca_editor_widget_t *ed);
+void write_buffer_file(gtcaca_editor_widget_t *ed);   /* the write itself, no questions */
 void set_mark(gtcaca_editor_widget_t *ed);
 void set_rectangle_mark(gtcaca_editor_widget_t *ed);
 void show_paren(gtcaca_editor_widget_t *ed);
@@ -227,6 +236,16 @@ void start_query_replace(void);
 void start_query_replace_regexp(void);
 void spell_word(gtcaca_editor_widget_t *ed);
 int  spell_key(gtcaca_editor_widget_t *ed, int key);
+
+/* lock.c — "changed on disk" prompts, as Emacs asks them */
+void ccm_stamp_buffer(int bi);          /* remember the file's modtime, as of now */
+int  ccm_buffer_stale(int bi);          /* file exists and differs from that stamp */
+void ccm_revert_buffer(int bi);         /* re-read the buffer from the file on disk */
+void ccm_check_supersession(gtcaca_editor_widget_t *ed);  /* from refresh_modeline */
+int  supersession_key(int key);         /* keys while the y/n/r question is up */
+void ccm_maybe_reread(int bi);          /* re-visiting a file that changed since */
+int  ccm_confirm_save(int bi);          /* 0 = a question went up instead of the write */
+void start_revert_buffer(void);         /* M-x revert-buffer */
 
 /* theme.c — per-user configuration dir and colour theme (~/.cacamacs/theme) */
 const char *ccm_config_dir(void);
@@ -307,6 +326,7 @@ void relayout(void);
 void save_as_done(const char *input);
 void show_browser(void);
 void show_help(void);
+void show_help_with(const char *title, const char *text);
 void start_save_as(void);
 void widget_to_front(gtcaca_widget_t *w);
 int win_alloc(void);

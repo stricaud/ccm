@@ -107,6 +107,10 @@ int on_key(gtcaca_editor_widget_t *ed, int key, void *ud)
     if (bi >= 0 && g_buffers[bi].pane >= 0) focus_pane(g_buffers[bi].pane);
   }
 
+  /* "<file> changed on disk; really edit the buffer?" takes precedence over
+     everything: in Emacs nothing else happens until it is answered. */
+  if (g_super_active) return supersession_key(key);
+
   /* incremental search, query-replace, spell picker and the minibuffer take keys first */
   if (g_isearch)     return isearch_key(ed, key);
   if (g_qr_active)   return query_replace_key(ed, key);

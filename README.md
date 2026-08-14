@@ -101,6 +101,16 @@ scripts/package-macos.sh          # → ccm-<version>.pkg
 Its postinstall seeds `~/.cacamacs/theme` from the bundled sample (never clobbering
 an existing one).
 
+## When the file changes on disk
+
+Edit, save or reopen a file that something else rewrote underneath you and
+cacamacs asks first, in Emacs' own words —
+`TIDAL.md changed on disk; really edit the buffer? (y, n, r or C-h)` on the
+first keystroke, `… has changed since visited or saved.  Save anyway?` on
+`C-x C-s`, `Reread from disk?` on `C-x C-f`. `M-x revert-buffer` rereads on
+purpose. See
+[docs/README-cacamacs.md](docs/README-cacamacs.md#when-the-file-changes-on-disk).
+
 ## Markdown
 
 `M-x md-` then Tab lists a set of helpers for writing prose — `md-title` and
@@ -140,6 +150,7 @@ Per-user files live in `~/.cacamacs/` (`%APPDATA%\cacamacs\` on Windows).
 ```
 src/            editor sources (cacamacs.c, ui.c, edit.c, search.c, …)
                 diagram.c / diagram_model.c — M-x diagram (mode / document)
+                lock.c — the "changed on disk" prompts (Emacs' userlock)
 docs/           feature docs + the colour-theme sample
 examples/       config sample and language extensions
 packaging/      cross-platform bundles + pip wheels (build.sh → wheel.py)

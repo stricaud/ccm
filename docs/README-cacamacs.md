@@ -52,6 +52,7 @@ Files    C-x C-f find file (Tab completes; a directory opens the browser)
          C-x C-c quit   C-x d browser
          (save dialog: type the name, Enter saves via the default OK button;
           Tab to the buttons, Cancel or C-g aborts)
+         M-x revert-buffer  throw the buffer away for the file on disk
 View     C-x l line numbers   C-x f folding   C-x t toggle fold   C-x a annotate
          C-x C-l line wrap (on by default; turn off to scroll long lines)
 JSON     C-x p pretty-print (.json/.jsonl open in JSON mode automatically)
@@ -90,6 +91,46 @@ is what lets `md-title` and `md-subtitle` change a heading's level.
 
 `md-ordered` renumbers the whole range from 1, so it also fixes a list whose
 numbering has drifted.
+
+## When the file changes on disk
+
+A buffer remembers the modification time its file had when it was read or last
+written. If something else — another editor, `git checkout`, a formatter —
+rewrites that file underneath you, cacamacs asks before anything is lost, with
+the same three questions Emacs asks:
+
+- **You start typing** in a buffer that is otherwise unmodified:
+
+  ```
+  TIDAL.md changed on disk; really edit the buffer? (y, n, r or C-h)
+  ```
+
+  `y` goes ahead (your buffer wins when you save), `n` takes that change back
+  out again, `r` rereads the file, and `C-h` explains the choice in a window.
+  Only the *first* change asks; once you have said `y` the buffer is yours.
+
+- **You save** (`C-x C-s`) a buffer whose file has moved on since:
+
+  ```
+  TIDAL.md has changed since visited or saved.  Save anyway? (yes or no)
+  ```
+
+- **You reopen** it — `C-x C-f`, or picking it out of the browser — while a
+  buffer for it is already open:
+
+  ```
+  File TIDAL.md changed on disk.  Reread from disk? (yes or no)
+  ```
+
+  (or *Discard your edits?* if you have unsaved changes.)
+
+The last two want a typed-out `yes` or `no`, as Emacs' `yes-or-no-p` does;
+anything else gets `Please answer yes or no.` and the question again. A file
+that has been *deleted* is not "changed" — there is nothing left to overwrite —
+so cacamacs stays quiet about it, and saving simply writes the file back.
+
+`M-x revert-buffer` throws a buffer away for the file on disk whenever you like;
+it asks first, and point stays where it was.
 
 ## Configuration — `~/.cacamacs/config.json`
 

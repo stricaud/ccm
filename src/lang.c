@@ -80,8 +80,22 @@ void refresh_modeline(gtcaca_editor_widget_t *ed, void *ud)
   name = compact_path(g_filename ? g_filename : "*scratch*", namebuf, sizeof namebuf, budget);
 
   (void)ud;
+  /* The widget calls this after every key it has handled, which makes it the
+     one place that sees a buffer go from unmodified to modified — where Emacs
+     asks about a file that changed on disk underneath it. Before the text is
+     built, so the question lands in this very refresh. */
+  ccm_check_supersession(ed);
   show_paren(ed);
   refold_if_edited(ed);
+  /* A question owns the whole bar. Emacs has an echo area under the mode line;
+     we have the one row, and "TIDAL.md changed on disk; really edit the buf"
+     is not a question anybody can answer. The buffer name and position come
+     back the moment it is answered. */
+  if (g_super_active || g_mb_active) {
+    snprintf(text, sizeof(text), " %s", g_message);
+    gtcaca_statusbar_set_text(g_modeline, text);
+    return;
+  }
   if (g_message[0])
     snprintf(text, sizeof(text), " %s %s  (%s)  L%d C%d   %s", mod, name, g_langname, line, col, g_message);
   else

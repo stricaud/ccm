@@ -130,7 +130,9 @@ const char *help_text(void)
   "Windows  C-x 2 split below   C-x 3 split right   C-x 1 one   C-x 0 close\n"
   "         C-x o other window   C-x b switch buffer\n"
   "Files    C-x C-f find file   C-x C-s save   C-x C-w write-as   C-x C-c quit\n"
-  "         C-x d directory browser\n"
+  "         C-x d directory browser   M-x revert-buffer re-read from disk\n"
+  "         a file changed by someone else is never overwritten or discarded\n"
+  "         silently: editing, saving or re-opening it asks first\n"
   "         the prompt starts in the current file's directory: type a name or\n"
   "         Tab to complete; Enter on a directory lists it; C-a C-e C-k M-DEL edit\n"
   "View     C-x l line numbers   C-x f folding   C-x t toggle fold   C-x a annotate\n"
@@ -152,19 +154,24 @@ const char *help_text(void)
   "Help     M-x help\n";
 }
 
-void show_help(void)
+/* The help window showing any text — the key bindings, or the explanation
+   behind a question (C-h at the "changed on disk" prompt; see lock.c). */
+void show_help_with(const char *title, const char *text)
 {
   pane_hide_all();                 /* modal: only the help window is visible */
+  g_help_win->window_title = (char *)title;   /* borrowed, as everywhere else */
   gtcaca_widget_show(GTCACA_WIDGET(g_help_win));
   gtcaca_widget_show(GTCACA_WIDGET(g_help_ed));
   gtcaca_editor_set_read_only(g_help_ed, 0);
-  gtcaca_editor_set_text(g_help_ed, help_text());
+  gtcaca_editor_set_text(g_help_ed, text);
   gtcaca_editor_set_read_only(g_help_ed, 1);
   gtcaca_editor_goto_pos(g_help_ed, 0);
   gtcaca_window_set_focus(g_help_win);
   gtcaca_window_set_focused_child(g_help_win, GTCACA_WIDGET(g_help_ed));
   g_help_open = 1;
 }
+
+void show_help(void) { show_help_with("Help — key bindings", help_text()); }
 
 void hide_help(void)
 {
@@ -284,6 +291,7 @@ int buffer_create(const char *path)
     gtcaca_editor_set_text(b->ed, c ? c : ""); free(c);
     strncpy(b->path, path, sizeof b->path - 1); b->path[sizeof b->path - 1] = '\0';
     b->has_file = 1;
+    ccm_stamp_buffer(bi);   /* what the file looked like when we visited it */
     /* Here rather than in the callers: every route to a file — the command
        line, C-x C-f, the browser, a pane split — lands in buffer_create, and
        the early return above means a buffer that is merely revisited is not
@@ -436,6 +444,9 @@ void open_path_in_editor(const char *path)
   pane_show_buffer(g_focus_leaf, bi);
   relayout();
   focus_pane(g_focus_leaf);
+  /* Already had a buffer for it, and the file has moved on since? Emacs offers
+     to reread it rather than showing you a stale copy without a word. */
+  ccm_maybe_reread(bi);
 }
 
 /* Split the focused leaf into two; the original stays as the first child. */
@@ -583,6 +594,7 @@ void save_as_done(const char *input)
   buffer_store_globals(g_cur_buf);
 
   gtcaca_editor_set_save_point(g_ed);
+  ccm_stamp_buffer(g_cur_buf);  /* the buffer now visits this file, as of now */
   ccm_log_file('W', b->path);   /* b->path, not `path`: the canonical absolute form */
   snprintf(g_message, sizeof g_message, "Wrote %s", path);
 }

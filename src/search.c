@@ -76,7 +76,10 @@ int isearch_key(gtcaca_editor_widget_t *ed, int key)
 /* ── minibuffer (used by replace) ──────────────────────────────────────────── */
 
 int g_mb_active = 0;
-static char  g_mb_prompt[64], g_mb_buf[PATH_MAX];
+/* Room for a whole question, not just a label: the file-changed-on-disk prompts
+   spell themselves out ("… has changed since visited or saved.  Save anyway?
+   (yes or no) ") exactly as Emacs does. */
+static char  g_mb_prompt[160], g_mb_buf[PATH_MAX];
 static int   g_mb_len = 0;
 static int   g_mb_point = 0;           /* caret index within g_mb_buf (0..len) */
 static int   g_mb_complete = 0;        /* Tab does filename completion */
@@ -220,6 +223,7 @@ static const char *g_mx_commands[] = { "help", "diagram", "undo", "redo",
                                        "snake", "sokoban", "describe-bindings",
                                        "query-replace", "query-replace-regexp",
                                        "replace-string", "goto-line",
+                                       "revert-buffer",
                                        "json-pretty-print", "xml-pretty-print",
                                        "insert-date", "insert-time",
                                        /* markdown: one prefix, so `M-x md-` Tab
@@ -553,6 +557,8 @@ void mx_done(const char *cmd)
     start_replace();
   else if (!strcmp(cmd, "goto-line"))
     start_goto_line();
+  else if (!strcmp(cmd, "revert-buffer"))
+    start_revert_buffer();
   else if (!strcmp(cmd, "json-pretty-print"))
     pretty_print_json_line(g_ed);
   else if (!strcmp(cmd, "xml-pretty-print"))

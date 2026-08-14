@@ -647,26 +647,44 @@ void pretty_print_xml_line(gtcaca_editor_widget_t *ed)
   snprintf(g_message, sizeof g_message, "Pretty-printed XML line");
 }
 
-void save_file(gtcaca_editor_widget_t *ed)
+/* The write itself. Split out from save_file because "the file changed on disk,
+   save anyway?" is answered in the minibuffer, long after the C-x C-s that
+   asked it: the answer calls back in here (see lock.c). */
+void write_buffer_file(gtcaca_editor_widget_t *ed)
 {
   FILE *f;
-  int len = gtcaca_editor_get_length(ed);
+  int len, bi;
   char *buf;
+  const char *path;
 
-  if (!g_filename) { start_save_as(); return; }   /* scratch buffer: ask for a name */
+  if (!ed) return;
+  bi = buf_index_of(ed);
+  path = (bi >= 0 && g_buffers[bi].has_file) ? g_buffers[bi].path : g_filename;
+  if (!path) return;
 
+  len = gtcaca_editor_get_length(ed);
   buf = malloc((size_t)len + 1);
   if (!buf) return;
   gtcaca_editor_get_text(ed, buf, len + 1);
 
-  f = fopen(g_filename, "w");
-  if (!f) { snprintf(g_message, sizeof(g_message), "Cannot write %s", g_filename); free(buf); return; }
+  f = fopen(path, "w");
+  if (!f) { snprintf(g_message, sizeof(g_message), "Cannot write %s", path); free(buf); return; }
   fwrite(buf, 1, (size_t)len, f);
   fclose(f);
   free(buf);
 
   gtcaca_editor_set_save_point(ed);
-  ccm_log_file('W', g_filename);
-  snprintf(g_message, sizeof(g_message), "Wrote %s", g_filename);
+  ccm_stamp_buffer(bi);            /* the file on disk is ours again */
+  ccm_log_file('W', path);
+  snprintf(g_message, sizeof(g_message), "Wrote %s", path);
+}
+
+void save_file(gtcaca_editor_widget_t *ed)
+{
+  if (!g_filename) { start_save_as(); return; }   /* scratch buffer: ask for a name */
+  /* Emacs never writes over a file that moved on under the buffer without
+     asking first; the answer does the write. */
+  if (!ccm_confirm_save(buf_index_of(ed))) return;
+  write_buffer_file(ed);
 }
 
