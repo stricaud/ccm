@@ -224,6 +224,7 @@ static const char *g_mx_commands[] = { "help", "diagram", "undo", "redo",
                                        "query-replace", "query-replace-regexp",
                                        "replace-string", "goto-line",
                                        "revert-buffer",
+                                       "set-mark", "copy-region", "kill-region",
                                        "json-pretty-print", "xml-pretty-print",
                                        "insert-date", "insert-time",
                                        /* markdown: one prefix, so `M-x md-` Tab
@@ -563,6 +564,15 @@ void mx_done(const char *cmd)
     pretty_print_json_line(g_ed);
   else if (!strcmp(cmd, "xml-pretty-print"))
     pretty_print_xml_line(g_ed);
+  /* Keyboard region without C-space: macOS binds Ctrl-Space to Input Sources,
+     and when it does the chord never reaches the terminal at all — leaving no
+     other way to set a mark, since C-x SPC starts a *rectangle* mark. */
+  else if (!strcmp(cmd, "set-mark"))
+    set_mark(g_ed);
+  else if (!strcmp(cmd, "copy-region"))
+    copy_region(g_ed);
+  else if (!strcmp(cmd, "kill-region"))
+    kill_region(g_ed);
   else if (!strcmp(cmd, "insert-date"))
     insert_date(g_ed);
   else if (!strcmp(cmd, "insert-time"))

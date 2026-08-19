@@ -132,6 +132,7 @@ extern int             g_cfg_tab, g_cfg_spaces, g_cfg_indent;
 extern int             g_cfg_edge;
 extern int             g_cfg_logfiles;   /* "logFiles": append to files.log */
 void ccm_log_file(char op, const char *path);   /* op: 'O' opened, 'W' wrote */
+int  ccm_run_diag(const char *argv0);           /* --diag: report + probe the terminal */
 extern lang_override_t g_overrides[32];
 extern int             g_noverrides;
 extern int             g_tab_size, g_insert_spaces, g_indent_size;

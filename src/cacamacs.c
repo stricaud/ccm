@@ -276,6 +276,7 @@ static void usage(FILE *out)
     "  -v, --version    show the version and exit\n"
     "  -w, --warnings   let library start-up warnings through to stderr\n"
     "      --configure  write a default config.json and exit (never overwrites)\n"
+    "      --diag       report terminal/library facts, probe mouse and keys, exit\n"
     "      --test       run the built-in self-test and exit\n"
     "\n"
     "  +LINE            open the file at that line, e.g.  ccm file.c +123\n"
@@ -298,6 +299,7 @@ int main(int argc, char **argv)
     { "version",  no_argument, NULL, 'v' },
     { "warnings",  no_argument, NULL, 'w' },
     { "configure", no_argument, NULL, 'C' },  /* long-form only */
+    { "diag",      no_argument, NULL, 'D' },  /* long-form only */
     { "test",      no_argument, NULL, 't' },  /* long-form only */
     { NULL,       0,           NULL,  0  }
   };
@@ -318,6 +320,7 @@ int main(int argc, char **argv)
     case 'v': printf("ccm (cacamacs) %s\n", CCM_VERSION_STR); return 0;
     case 'w': g_warnings = 1; break;
     case 'C': return write_default_config();
+    case 'D': return ccm_run_diag(argv[0]);   /* before any display is opened */
     case 't': selftest = 1;   break;
     default:  usage(stderr);  return 2;
     }
