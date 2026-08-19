@@ -13,6 +13,14 @@
  * the controlling terminal directly, exactly the way gtcaca does at runtime, so
  * what they measure is what the editor would get.
  */
+/* dladdr()/Dl_info are GNU extensions: glibc's <dlfcn.h> keeps them behind
+   __USE_GNU, and -std=gnu99 (what this project builds with) does not turn that
+   on — so the define has to come before any header is pulled in, including
+   cacamacs.h. macOS and the BSDs declare both unconditionally and ignore it. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "cacamacs.h"
 
 #include <errno.h>
@@ -41,10 +49,11 @@ static void lib_row(const char *name, void *sym)
 #ifndef _WIN32
   Dl_info info;
   if (sym && dladdr(sym, &info) && info.dli_fname) { row(name, info.dli_fname); return; }
+  row(name, "(unresolved)");
 #else
   (void)sym;
+  row(name, "(DLL path not reported on Windows)");
 #endif
-  row(name, "(unresolved)");
 }
 
 #ifndef _WIN32
