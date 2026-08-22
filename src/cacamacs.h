@@ -161,6 +161,7 @@ extern int g_super_active;       /* the "changed on disk; really edit?" question
 /* games (games.c) */
 void run_snake(void);
 void run_sokoban(void);
+void run_bird(void);
 
 /* functions */
 /* edit.c */

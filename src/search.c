@@ -282,7 +282,7 @@ void minibuffer_replace_tail(const char *name)
 
 /* M-x command names offered by completion (aliases still run, see mx_done) */
 static const char *g_mx_commands[] = { "help", "diagram", "undo", "redo",
-                                       "snake", "sokoban", "describe-bindings",
+                                       "snake", "sokoban", "bird", "describe-bindings",
                                        "query-replace", "query-replace-regexp",
                                        "replace-string", "goto-line",
                                        "revert-buffer",
@@ -647,6 +647,8 @@ void mx_done(const char *cmd)
     run_snake();
   else if (!strcmp(cmd, "sokoban"))
     run_sokoban();
+  else if (!strcmp(cmd, "bird") || !strcmp(cmd, "flappy"))
+    run_bird();
   else if (!strcmp(cmd, "query-replace"))
     start_query_replace();
   else if (!strcmp(cmd, "query-replace-regexp"))

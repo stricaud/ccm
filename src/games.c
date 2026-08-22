@@ -1,4 +1,4 @@
-/* games.c — snake and sokoban, split out of cacamacs.c. They are
+/* games.c — snake, sokoban and bird, split out of cacamacs.c. They are
    self-contained game loops; the only shared symbol is g_message. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,7 +33,7 @@ static void snake_cell(int x, int y, uint8_t colour)
 }
 
 /* fill the whole canvas with solid black blocks (a clean, always-repainted bg) */
-static void snake_fill_bg(void)
+static void game_fill_bg(void)
 {
   int x, y, CW = caca_get_canvas_width(gmo.cv), CH = caca_get_canvas_height(gmo.cv);
   caca_set_color_ansi(gmo.cv, CACA_BLACK, CACA_BLACK);
@@ -148,7 +148,7 @@ void run_snake(void)
   /* start screen: choose a starting level (as Nibbles prompts for skill) */
   {
     int chosen = 0, ox = snake_ox, oy = snake_oy;
-    snake_fill_bg();
+    game_fill_bg();
     caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, CACA_BOLD);
     caca_printf(gmo.cv, ox + W / 2 - 4, oy + H / 2 - 3, "S N A K E");
     caca_set_attr(gmo.cv, 0);
@@ -175,7 +175,7 @@ void run_snake(void)
     int nx, ny, ate, tx, ty, idx;
 
     /* ── draw the whole board ── */
-    snake_fill_bg();                           /* solid black field */
+    game_fill_bg();                           /* solid black field */
     caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, 0);
     caca_printf(gmo.cv, snake_ox + 1, snake_oy + 0, "SNAKE  level %d   eat: %d   score: %d   lives: %d   (p pause, q quit)",
                 level + 1, number, score, lives);
@@ -744,7 +744,7 @@ void run_sokoban(void)
     ox = (W - L.w * tw) / 2;       if (ox < 0) ox = 0;
     oy = 1 + ((H - 1) - L.h * th) / 2; if (oy < 1) oy = 1;
 
-    snake_fill_bg();                         /* solid black background */
+    game_fill_bg();                         /* solid black background */
     caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, 0);
     caca_printf(gmo.cv, 1, 0, "SOKOBAN  level %d   moves %d   (arrows move, u undo, r reset, n/p level, q quit)%s",
                 idx, moves, have_dir ? "" : "   [built-in]");
@@ -812,3 +812,232 @@ void run_sokoban(void)
   snprintf(g_message, sizeof g_message, "Sokoban: level %d", idx);
 }
 
+
+/* ── bird (M-x bird) ────────────────────────────────────────────────────────
+ * A one-key flyer in the spirit of Flappy Bird: gravity pulls the bird down
+ * every tick and a key beats its wings. The whole game is the gaps — they
+ * narrow and crowd together as the score climbs. Original implementation.
+ *
+ * The bird's height is kept in hundredths of a row so gravity accumulates
+ * smoothly instead of snapping a whole row per tick; only the drawing rounds
+ * to a cell. */
+
+#define BIRD_MAXPIPES 24
+#define BIRD_PIPE_W   2                      /* columns per pipe, for visibility */
+/* The dial runs 1..9 and starts at 1 — but 1 is brisk, not the crawl it used to
+   be, and 9 is genuinely quick. The whole scale was pulled down: 48ms a frame at
+   the bottom, 16ms at the top. */
+#define BIRD_SPEED_START 1
+#define BIRD_SPEED_MAX   9
+
+typedef struct { int x, gap_y, gap_h, scored; } bird_pipe_t;
+
+static int bird_ox = 0, bird_oy = 0;
+
+static void bird_put(int x, int y, uint8_t colour, uint32_t ch, int bold)
+{
+  caca_set_color_ansi(gmo.cv, colour, CACA_BLACK);
+  caca_set_attr(gmo.cv, bold ? CACA_BOLD : 0);
+  caca_put_char(gmo.cv, bird_ox + x, bird_oy + y, ch);
+}
+
+/* The bird is three cells wide and two tall — body and beak on its own row,
+   a wing above that beats as it climbs and spreads as it falls, which is the
+   only animation the game needs to read as alive. Only the body row counts for
+   collisions: a hitbox as big as the drawing would feel unfair. */
+static void bird_draw(int x, int r, int rising, int top)
+{
+  if (r - 1 >= top) bird_put(x, r - 1, CACA_WHITE, rising ? '^' : '~', 1);
+  bird_put(x - 1, r, CACA_YELLOW,   '(', 1);      /* body  */
+  bird_put(x,     r, CACA_WHITE,    'o', 1);      /* eye   */
+  bird_put(x + 1, r, CACA_LIGHTRED, '>', 1);      /* beak  */
+}
+
+/* A fresh pipe at the right edge: the gap goes anywhere that leaves a lip of
+   solid pipe above and below, so the bird always has somewhere to aim. */
+static void bird_new_pipe(bird_pipe_t *p, int x, int top, int bottom, int gap_h)
+{
+  int span = bottom - top + 1;
+  int room = span - gap_h - 2;               /* 1 row of pipe top and bottom */
+  p->x = x;
+  p->gap_h = gap_h;
+  p->gap_y = top + 1 + (room > 0 ? rand() % room : 0);
+  p->scored = 0;
+}
+
+/* Speed is the game's single difficulty dial: it sets the tick, how tight the
+   gaps are, and how close together they come. Both the automatic ramp and the
+   player's '+' go through here, so they cannot disagree. */
+static void bird_apply_speed(int speed, int span, int *tick_ms, int *gap_h, int *spacing, int W)
+{
+  *tick_ms = 52 - speed * 4;                 /* speed 1 = 48ms … speed 9 = 16ms */
+  if (*tick_ms < 16) *tick_ms = 16;          /* a full repaint per tick needs the room */
+  /* Gaps are measured from the starting speed, so speed 5 is the honest
+     baseline and every step above it genuinely tightens the world. */
+  *gap_h   = span / 3 - (speed - BIRD_SPEED_START) / 2;
+  if (*gap_h < 4) *gap_h = 4;
+  *spacing = W / 3 - (speed - BIRD_SPEED_START);
+  if (*spacing < 8) *spacing = 8;
+}
+
+void run_bird(void)
+{
+  int CW = caca_get_canvas_width(gmo.cv);
+  int CH = caca_get_canvas_height(gmo.cv);
+  int W = CW, H = CH;
+  int top = 1, bottom, ground;               /* row 0 is the status line */
+  int bird_x, y100, vel100;
+  int score = 0, gaps = 0, running = 1, started = 0, dead = 0, autostart = 0;
+  int gap_h, spacing, tick_ms = 48, speed = BIRD_SPEED_START, span;
+  bird_pipe_t pipes[BIRD_MAXPIPES];
+  int npipe = 0, i, x, y;
+  static int best = 0;                       /* best of this session */
+  caca_event_t ev;
+
+  if (W < 24 || H < 10) { snprintf(g_message, sizeof g_message, "Window too small for bird"); return; }
+  bird_ox = 0; bird_oy = 0;
+  ground = H - 1;
+  bottom = ground - 1;                       /* last flyable row */
+  bird_x = W / 4;
+  srand((unsigned)time(NULL));
+
+  /* start screen */
+  {
+    int chosen = 0;
+    game_fill_bg();
+    caca_set_color_ansi(gmo.cv, CACA_YELLOW, CACA_BLACK); caca_set_attr(gmo.cv, CACA_BOLD);
+    caca_printf(gmo.cv, W / 2 - 4, H / 2 - 3, "B I R D");
+    caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, 0);
+    caca_printf(gmo.cv, W / 2 - 20, H / 2 - 1, "Space or Up flaps — that is the whole game.");
+    caca_printf(gmo.cv, W / 2 - 20, H / 2 + 0, "Fly through the gaps. Every 5 gaps the world speeds");
+    caca_printf(gmo.cv, W / 2 - 20, H / 2 + 1, "up on its own; + speeds it up now, and there is no");
+    caca_printf(gmo.cv, W / 2 - 20, H / 2 + 2, "way back down. A gap pays its speed in points.");
+    caca_printf(gmo.cv, W / 2 - 20, H / 2 + 4, "Speed 1 is already brisk; 9 is as fast as it gets.");
+    caca_printf(gmo.cv, W / 2 - 20, H / 2 + 5, "Space starts.  p pauses, q quits.");
+    caca_refresh_display(gmo.dp);
+    while (!chosen) {
+      if (caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) {
+        int k = caca_get_event_key_ch(&ev);
+        if (k == 'q' || k == 'Q' || k == CACA_KEY_ESCAPE) { gtcaca_redraw(); return; }
+        /* Space here means "go" — asking for it twice (once to leave the title,
+           once to take off) reads as the game ignoring the first press. */
+        if (k == ' ' || k == CACA_KEY_UP || k == 'w' || k == 'W') autostart = 1;
+        chosen = 1;
+      }
+    }
+  }
+
+restart:
+  span = bottom - top + 1;
+  speed = BIRD_SPEED_START;
+  bird_apply_speed(speed, span, &tick_ms, &gap_h, &spacing, W);
+  y100 = ((top + bottom) / 2) * 100;
+  vel100 = 0;
+  score = 0; gaps = 0; npipe = 0; started = 0; dead = 0;
+  bird_new_pipe(&pipes[npipe++], W - 1, top, bottom, gap_h);
+  if (autostart) { started = 1; vel100 = -115; autostart = 0; }
+
+  while (running) {
+    int r = y100 / 100;
+
+    /* ── draw ── */
+    game_fill_bg();
+    caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, 0);
+    caca_printf(gmo.cv, 1, 0, "BIRD   score %d   best %d   speed %d/9   (space/Up flap, + faster, p pause, q quit)",
+                score, best, speed);
+
+    for (i = 0; i < npipe; i++) {             /* pipes, drawn as solid blocks */
+      for (x = pipes[i].x; x < pipes[i].x + BIRD_PIPE_W; x++) {
+        if (x < 0 || x >= W) continue;
+        for (y = top; y <= bottom; y++)
+          if (y < pipes[i].gap_y || y >= pipes[i].gap_y + pipes[i].gap_h)
+            bird_put(x, y, CACA_GREEN, 0x2588, 0);   /* █ */
+      }
+    }
+    for (x = 0; x < W; x++) bird_put(x, ground, CACA_BROWN, 0x2588, 0);
+    bird_draw(bird_x, r, vel100 < 0, top);
+
+    if (!started) {
+      caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, CACA_BOLD);
+      caca_printf(gmo.cv, W / 2 - 12, top + 1, " press space to fly ");
+    }
+    caca_refresh_display(gmo.dp);
+
+    /* ── input; the timeout is what makes gravity tick (microseconds) ── */
+    if (caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, started ? tick_ms * 1000 : -1)) {
+      int k = caca_get_event_key_ch(&ev);
+      if (k == 'q' || k == 'Q' || k == CACA_KEY_ESCAPE) { running = 0; continue; }
+      if (k == 'p' || k == 'P') {
+        caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, CACA_BOLD);
+        caca_printf(gmo.cv, W / 2 - 5, top + 1, " paused ");
+        caca_refresh_display(gmo.dp);
+        caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1);
+        continue;
+      }
+      if (k == '+' || k == '=') {           /* faster, and worth more — no way back */
+        if (speed < BIRD_SPEED_MAX) {
+          speed++;
+          bird_apply_speed(speed, span, &tick_ms, &gap_h, &spacing, W);
+        }
+        continue;
+      }
+      if (k == ' ' || k == CACA_KEY_UP || k == 'w' || k == 'W' || k == CACA_KEY_CTRL_P) {
+        started = 1;
+        vel100 = -115;                        /* a beat cancels the fall outright */
+      }
+    }
+    if (!started) continue;
+
+    /* ── gravity ── */
+    vel100 += 20;
+    if (vel100 > 140) vel100 = 140;           /* terminal velocity, so a dive stays readable */
+    y100 += vel100;
+    if (y100 < top * 100) { y100 = top * 100; vel100 = 0; }   /* the ceiling holds it, not kills it */
+    r = y100 / 100;
+
+    /* ── scroll the pipes, spawn and retire ── */
+    for (i = 0; i < npipe; i++) pipes[i].x--;
+    if (npipe && pipes[0].x + BIRD_PIPE_W < 0) {              /* the leftmost left the screen */
+      for (i = 1; i < npipe; i++) pipes[i - 1] = pipes[i];
+      npipe--;
+    }
+    if (npipe < BIRD_MAXPIPES && (npipe == 0 || pipes[npipe - 1].x <= W - 1 - spacing))
+      bird_new_pipe(&pipes[npipe++], W - 1, top, bottom, gap_h);
+
+    /* ── score, and tighten the game as it goes ── */
+    for (i = 0; i < npipe; i++)
+      if (!pipes[i].scored && pipes[i].x + BIRD_PIPE_W < bird_x) {
+        pipes[i].scored = 1;
+        score += speed;                       /* the faster it is, the more a gap pays */
+        gaps++;
+        if (score > best) best = score;
+        if (gaps % 5 == 0 && speed < BIRD_SPEED_MAX) {   /* it also speeds up on its own */
+          speed++;
+          bird_apply_speed(speed, span, &tick_ms, &gap_h, &spacing, W);
+        }
+      }
+
+    /* ── collide ── */
+    if (r >= ground) dead = 1;
+    for (i = 0; i < npipe && !dead; i++)
+      if (bird_x + 1 >= pipes[i].x && bird_x - 1 < pipes[i].x + BIRD_PIPE_W &&
+          (r < pipes[i].gap_y || r >= pipes[i].gap_y + pipes[i].gap_h))
+        dead = 1;
+
+    if (dead) {
+      caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_RED); caca_set_attr(gmo.cv, CACA_BOLD);
+      caca_printf(gmo.cv, W / 2 - 22, H / 2, "  DOWN  -  score %d  -  best %d  -  r restart, q quit  ", score, best);
+      caca_refresh_display(gmo.dp);
+      for (;;) {
+        caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1);
+        { int k = caca_get_event_key_ch(&ev);
+          if (k == 'r' || k == 'R') goto restart;
+          if (k == 'q' || k == 'Q' || k == CACA_KEY_ESCAPE) { running = 0; break; } }
+      }
+    }
+  }
+
+  snprintf(g_message, sizeof g_message, "Bird: final score %d (best %d)", score, best);
+  gtcaca_redraw();
+  caca_refresh_display(gmo.dp);
+}
