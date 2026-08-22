@@ -328,6 +328,22 @@ void save_as_done(const char *input);
 void show_browser(void);
 void show_help(void);
 void show_help_with(const char *title, const char *text);
+
+/* Completions buffer — what a Tab shows when its candidates overflow the echo
+   line: an ordinary buffer in a split window, so C-x o, C-s and resizing all
+   work as they do anywhere else. COMPLETE_RUN executes the chosen candidate
+   (M-x), COMPLETE_INSERT puts it at the prompt and leaves confirming to the
+   user (filenames). */
+#define COMPLETE_RUN    0
+#define COMPLETE_INSERT 1
+void completions_show(const char *const *items, int n, int mode);
+void completions_hide(void);
+void completions_pick_at_point(void);
+int  completions_focused(void);
+int  completions_open(void);
+void pane_split_with(int bi, int rows);
+void minibuffer_accept(const char *text);        /* as if typed and confirmed */
+void minibuffer_replace_tail(const char *name);  /* swap the last path component */
 void start_save_as(void);
 void widget_to_front(gtcaca_widget_t *w);
 int win_alloc(void);

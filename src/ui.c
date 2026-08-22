@@ -139,6 +139,11 @@ const char *help_text(void)
   "         C-x C-l line wrap (on by default)   C-x w whitespace   C-l recenter\n"
   "Pretty   C-x p pretty-print JSON/XML (auto: selection / buffer / line)\n"
   "         M-x json-pretty-print · xml-pretty-print (current line)\n"
+  "Complete Tab at a prompt completes; candidates that do not fit on the echo\n"
+  "         line open a *Completions* window — an ordinary buffer, so C-x o\n"
+  "         steps into it, C-s searches it and C-v scrolls it. Enter there runs\n"
+  "         the M-x command under the caret (a filename goes to the prompt\n"
+  "         instead); q or Esc closes it\n"
   "Insert   M-x insert-date  2026-08-11      M-x insert-time  + 14:03:27\n"
   "Markdown M-x md-<Tab> lists them all. On the region, else the line or word;\n"
   "         each one run twice takes the markup back off.\n"
@@ -179,6 +184,135 @@ void hide_help(void)
   gtcaca_widget_hide(GTCACA_WIDGET(g_help_win));
   g_help_open = 0;
   pane_show_all();
+}
+
+/* ── completions buffer (Tab at a prompt) ──────────────────────────────────
+ * Emacs' *Completions*: when a Tab has more candidates than the echo line can
+ * hold, they go into an ordinary buffer shown in a split window. Ordinary is
+ * the point — C-x o walks into it, C-s searches it, C-x 0 closes it, and a
+ * terminal resize relayouts it, all through the machinery the editor already
+ * has. What is left here is only what is specific to completing: filling the
+ * buffer, and taking the candidate under the caret when Enter is pressed.
+ *
+ * COMPLETE_RUN candidates (M-x) run on Enter; COMPLETE_INSERT ones (filenames)
+ * only go to the prompt, since choosing a name is not agreeing to write to it. */
+static int g_comp_buf = -1;        /* its buffer, kept between uses */
+static int g_comp_mode = COMPLETE_RUN;
+
+/* "Open" is not a flag to keep in step — it is simply whether the buffer is on
+   screen. So C-x 0 and C-x 1 close the completions window like any other, and
+   nothing here has to know they happened. */
+int completions_open(void)
+{
+  return g_comp_buf >= 0 && g_comp_buf < g_nbuf && g_buffers[g_comp_buf].pane >= 0;
+}
+
+/* Is the caret in the completions window? Then it takes the keys, not the
+   prompt — which is otherwise swallowing everything while it is active. */
+int completions_focused(void)
+{
+  return completions_open() && g_cur_buf == g_comp_buf;
+}
+
+/* Lay the candidates out in columns that fit the window, like Emacs does: a
+   long M-x list is then readable in a three-line window. */
+static char *comp_layout(const char *const *items, int n, int width)
+{
+  int i, longest = 0, cols, col = 0;
+  size_t cap = 1, off = 0;
+  char *text;
+
+  for (i = 0; i < n; i++) {
+    int l = (int)strlen(items[i]);
+    if (l > longest) longest = l;
+    cap += (size_t)l + 3;
+  }
+  cols = (width - 2) / (longest + 2);
+  if (cols < 1) cols = 1;
+  cap += (size_t)n * (size_t)(longest + 2) + 8;
+
+  text = malloc(cap);
+  if (!text) return NULL;
+  text[0] = '\0';
+  for (i = 0; i < n; i++) {
+    int last = (col == cols - 1) || (i == n - 1);
+    off += (size_t)snprintf(text + off, cap - off, "%-*s%s",
+                            last ? 0 : longest + 2, items[i], last ? "\n" : "");
+    col = last ? 0 : col + 1;
+  }
+  return text;
+}
+
+void completions_show(const char *const *items, int n, int mode)
+{
+  int width = 60;
+
+  if (n <= 0) return;
+  if (g_comp_buf < 0 || g_comp_buf >= g_nbuf) {
+    g_comp_buf = buffer_create(NULL);
+    if (g_comp_buf < 0) return;
+    snprintf(g_buffers[g_comp_buf].path, sizeof g_buffers[g_comp_buf].path, "*Completions*");
+    gtcaca_editor_set_line_numbers(g_buffers[g_comp_buf].ed, 0);
+    gtcaca_editor_set_caret_line_visible(g_buffers[g_comp_buf].ed, 1);
+  }
+  g_comp_mode = mode;
+
+  /* Give it a window before filling it, so the layout can use the real width. */
+  if (g_buffers[g_comp_buf].pane < 0) pane_split_with(g_comp_buf, 1);
+  if (g_buffers[g_comp_buf].pane >= 0) {
+    int w = g_nodes[g_buffers[g_comp_buf].pane].w;
+    if (w > 4) width = w;
+  }
+
+  {
+    char *text = comp_layout(items, n, width);
+    gtcaca_editor_widget_t *ed = g_buffers[g_comp_buf].ed;
+    if (!text) return;
+    gtcaca_editor_set_read_only(ed, 0);
+    gtcaca_editor_set_text(ed, text);
+    gtcaca_editor_set_read_only(ed, 1);
+    gtcaca_editor_goto_pos(ed, 0);
+    free(text);
+  }
+}
+
+void completions_hide(void)
+{
+  int comp_pane, keep;
+  if (!completions_open()) return;
+  comp_pane = g_buffers[g_comp_buf].pane;
+  keep = g_focus_leaf;                             /* the pane to come back to */
+  focus_pane(comp_pane);
+  pane_delete_current();
+  if (keep != comp_pane && g_nodes[keep].used && g_nodes[keep].is_leaf) focus_pane(keep);
+}
+
+/* Enter in the completions window: run (or insert) the candidate the caret is
+   sitting on — the word under point, since the layout puts several per line. */
+void completions_pick_at_point(void)
+{
+  gtcaca_editor_widget_t *ed = g_buffers[g_comp_buf].ed;
+  int line = gtcaca_editor_get_current_line(ed);
+  int s = gtcaca_editor_position_from_line(ed, line);
+  int e = gtcaca_editor_get_line_end_position(ed, line);
+  int pos = gtcaca_editor_get_current_pos(ed);
+  char row[512], pick[PATH_MAX];
+  int i, a, b, mode = g_comp_mode;
+
+  if (e - s <= 0 || e - s >= (int)sizeof row) return;
+  gtcaca_editor_get_text_range(ed, s, e, row, sizeof row);
+  i = pos - s;
+  if (i < 0) i = 0;
+  if (i > (int)strlen(row)) i = (int)strlen(row);
+  if (row[i] == ' ' && i > 0) i--;                 /* caret in the padding: take the word left */
+  a = i; while (a > 0 && row[a - 1] != ' ') a--;
+  b = i; while (row[b] && row[b] != ' ') b++;
+  if (b <= a) return;
+  snprintf(pick, (size_t)(b - a) + 1 < sizeof pick ? (size_t)(b - a) + 1 : sizeof pick, "%s", row + a);
+
+  completions_hide();
+  if (mode == COMPLETE_RUN) minibuffer_accept(pick);
+  else                      minibuffer_replace_tail(pick);
 }
 
 /* Open whatever entry the caret is on: descend into a directory, or open a file. */
@@ -249,7 +383,9 @@ void buffer_load_globals(int bi)
   g_ed = b->ed; g_langcfg = b->langcfg; g_grammar = b->grammar;
   g_keywords = b->keywords; g_n_keywords = b->n_keywords; g_folding = b->folding;
   strncpy(g_langname, b->langname, sizeof g_langname - 1); g_langname[sizeof g_langname - 1] = '\0';
-  g_filename = b->has_file ? b->path : NULL;
+  /* A named buffer with no file (*Completions*) still shows its name on the
+     modeline; a plain scratch buffer has none and falls back to *scratch*. */
+  g_filename = (b->has_file || b->path[0]) ? b->path : NULL;
 }
 
 /* Create a buffer for `path` (NULL = scratch); dedups by path. Sets up the
@@ -363,7 +499,8 @@ void position_leaf(int n)
     gtcaca_box_add_expand(bx, GTCACA_WIDGET(b->ed));
     gtcaca_box_apply(bx, nd->x, nd->y, nd->w, nd->h);
     gtcaca_box_free(bx);
-    win->window_title = b->has_file ? b->path : "*scratch*";
+    /* A buffer with no file still gets a name when it has one (*Completions*). */
+    win->window_title = (b->has_file || b->path[0]) ? b->path : "*scratch*";
   }
 }
 
@@ -450,12 +587,16 @@ void open_path_in_editor(const char *path)
 }
 
 /* Split the focused leaf into two; the original stays as the first child. */
-void pane_split(int rows)
+/* Split, showing `newbuf` in the new window — or, with newbuf < 0, whichever
+   buffer is not on screen yet (what C-x 2 / C-x 3 do). Focus stays where it
+   was, as in Emacs. */
+void pane_split_with(int newbuf, int rows)
 {
-  int L = g_focus_leaf, c0, c1, wi, newbuf = -1, i;
+  int L = g_focus_leaf, c0, c1, wi, i;
   if (L < 0 || !g_nodes[L].is_leaf) return;
 
-  for (i = 0; i < g_nbuf; i++) if (g_buffers[i].pane < 0 && i != g_cur_buf) { newbuf = i; break; }
+  if (newbuf < 0)
+    for (i = 0; i < g_nbuf; i++) if (g_buffers[i].pane < 0 && i != g_cur_buf) { newbuf = i; break; }
   if (newbuf < 0) { newbuf = buffer_create(NULL); if (newbuf < 0) return; }
 
   c0 = node_alloc(); c1 = node_alloc(); wi = win_alloc();
@@ -478,6 +619,8 @@ void pane_split(int rows)
   relayout();
   focus_pane(c0);
 }
+
+void pane_split(int rows) { pane_split_with(-1, rows); }
 
 void pane_unsplit_one(void)
 {
@@ -548,7 +691,8 @@ void pane_switch_buffer(void)
   if (bi < 0) { snprintf(g_message, sizeof g_message, "No other buffer"); return; }
   pane_show_buffer(g_focus_leaf, bi);
   focus_pane(g_focus_leaf);
-  snprintf(g_message, sizeof g_message, "%s", g_buffers[bi].has_file ? g_buffers[bi].path : "*scratch*");
+  snprintf(g_message, sizeof g_message, "%s",
+           (g_buffers[bi].has_file || g_buffers[bi].path[0]) ? g_buffers[bi].path : "*scratch*");
 }
 
 /* ── save-as (C-x C-w, and C-x C-s on a scratch buffer) ────────────────────── */

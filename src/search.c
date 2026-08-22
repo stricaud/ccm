@@ -84,6 +84,7 @@ static int   g_mb_len = 0;
 static int   g_mb_point = 0;           /* caret index within g_mb_buf (0..len) */
 static int   g_mb_complete = 0;        /* Tab does filename completion */
 static int   g_mb_meta = 0;            /* an Esc (Meta) prefix is pending */
+static int   g_mb_ctrl_x = 0;          /* a C-x prefix is pending (C-x o) */
 static void (*g_mb_cb)(const char *) = NULL;
 
 /* Render the prompt + text with a caret bar (▏) drawn at point. */
@@ -126,6 +127,7 @@ static void mb_kill_word_right(void)
 void start_minibuffer_init(const char *prompt, void (*cb)(const char *), int complete, const char *initial)
 {
   g_mb_active = 1; g_mb_cb = cb; g_mb_complete = complete; g_mb_meta = 0;
+  g_mb_ctrl_x = 0; completions_hide();      /* no list carried over from last time */
   strncpy(g_mb_prompt, prompt, sizeof g_mb_prompt - 1); g_mb_prompt[sizeof g_mb_prompt - 1] = '\0';
   if (initial) { strncpy(g_mb_buf, initial, sizeof g_mb_buf - 1); g_mb_buf[sizeof g_mb_buf - 1] = '\0'; }
   else g_mb_buf[0] = '\0';
@@ -181,6 +183,7 @@ void minibuffer_complete_path(void)
   char *slash = strrchr(g_mb_buf, '/');
   int plen, nmatch = 0, need;
   DIR *d; struct dirent *de;
+  char **names = NULL; int ncap = 0;      /* the matches themselves, for the panel */
 
   if (slash) { size_t dl = (size_t)(slash - g_mb_buf) + 1; if (dl >= sizeof dir) return; memcpy(dir, g_mb_buf, dl); dir[dl] = '\0'; snprintf(partial, sizeof partial, "%s", slash + 1); }
   else { dir[0] = '\0'; snprintf(partial, sizeof partial, "%s", g_mb_buf); }
@@ -195,17 +198,29 @@ void minibuffer_complete_path(void)
     if (strncmp(de->d_name, partial, (size_t)plen) == 0) {
       if (nmatch == 0) snprintf(common, sizeof common, "%s", de->d_name);
       else { int i = 0; while (common[i] && de->d_name[i] && common[i] == de->d_name[i]) i++; common[i] = '\0'; }
+      if (nmatch == ncap) {                       /* keep the names for the panel */
+        int grow = ncap ? ncap * 2 : 32;
+        char **bigger = realloc(names, sizeof *names * (size_t)grow);
+        if (bigger) { names = bigger; ncap = grow; }
+      }
+      if (nmatch < ncap) {
+        size_t l = strlen(de->d_name) + 1;
+        names[nmatch] = malloc(l);
+        if (names[nmatch]) memcpy(names[nmatch], de->d_name, l);
+        else ncap = nmatch;                       /* out of memory: stop collecting */
+      }
       nmatch++;
     }
   }
   closedir(d);
-  if (nmatch == 0) { snprintf(g_message, sizeof g_message, "No match"); return; }
+  if (nmatch == 0) { free(names); snprintf(g_message, sizeof g_message, "No match"); return; }
 
   need = snprintf(g_mb_buf, sizeof g_mb_buf, "%s%s", dir, common);
   if (need < 0 || need >= (int)sizeof g_mb_buf) return;
   g_mb_len = (int)strlen(g_mb_buf);
   /* Point follows the completed text — and must be set before mb_status, which
      draws the caret where g_mb_point says, not at the end of the buffer. */
+  completions_hide();                         /* the old list is stale now */
   if (nmatch == 1) {                          /* unique: add '/' if a directory */
     char full[PATH_MAX]; struct stat st;
     expand_tilde(g_mb_buf, full, sizeof full);
@@ -214,8 +229,55 @@ void minibuffer_complete_path(void)
     mb_status();
   } else {
     g_mb_point = g_mb_len;
-    snprintf(g_message, sizeof g_message, "%s%s   (%d matches)", g_mb_prompt, g_mb_buf, nmatch);
+    /* Several: list them. The names never fit the echo line, which is why this
+       prompt only ever reported a count before. */
+    if (names && nmatch <= ncap) {
+      completions_show((const char *const *)names, nmatch, COMPLETE_INSERT);
+      snprintf(g_message, sizeof g_message, "%s%s   %d matches — C-x o",
+               g_mb_prompt, g_mb_buf, nmatch);
+    } else {
+      snprintf(g_message, sizeof g_message, "%s%s   (%d matches)",
+               g_mb_prompt, g_mb_buf, nmatch);
+    }
   }
+  { int i; for (i = 0; i < nmatch && i < ncap; i++) free(names[i]); }
+  free(names);
+}
+
+/* Would prompt + input + this candidate list run off the echo line? That is
+   exactly when Emacs stops truncating and opens its *Completions* buffer, so
+   it is what decides between the inline "{a  b  c}" and the panel. */
+static int echo_overflows(size_t listlen)
+{
+  int width = caca_get_canvas_width(gmo.cv);
+  size_t used = strlen(g_mb_prompt) + (size_t)g_mb_len + 6;   /* 6: the "   {}" decoration */
+  if (width <= 0) width = 80;
+  return used + listlen > (size_t)width - 1;
+}
+
+/* Run a candidate chosen in the completions list as if it had been typed at
+   the prompt and confirmed (mirrors the Return case in minibuffer_key). */
+void minibuffer_accept(const char *text)
+{
+  void (*cb)(const char *) = g_mb_cb;
+  char tmp[PATH_MAX];
+  g_mb_active = 0; g_message[0] = '\0';
+  snprintf(tmp, sizeof tmp, "%s", text);
+  if (cb) cb(tmp);
+}
+
+/* Put a chosen filename at the prompt in place of whatever was being typed
+   after the last '/', leaving the prompt open: picking a name in the list is
+   not the same as agreeing to write to it. */
+void minibuffer_replace_tail(const char *name)
+{
+  char *slash = strrchr(g_mb_buf, '/');
+  size_t keep = slash ? (size_t)(slash - g_mb_buf) + 1 : 0;
+  int need = snprintf(g_mb_buf + keep, sizeof g_mb_buf - keep, "%s", name);
+  if (need < 0 || (size_t)need >= sizeof g_mb_buf - keep) g_mb_buf[keep] = '\0';
+  g_mb_len = (int)strlen(g_mb_buf);
+  g_mb_point = g_mb_len;
+  mb_status();
 }
 
 /* M-x command names offered by completion (aliases still run, see mx_done) */
@@ -257,12 +319,39 @@ void minibuffer_complete_command(void)
     char list[288] = ""; size_t off = 0; int k;
     for (k = 0; k < n && off < sizeof list - 1; k++)
       off += (size_t)snprintf(list + off, sizeof list - off, "%s%s", k ? "  " : "", matches[k]);
+    if (echo_overflows(off)) {
+      completions_show(matches, n, COMPLETE_RUN);
+      /* The window has no visible title bar here, so the echo line is what
+         tells the user it opened and how to get into it. */
+      snprintf(g_message, sizeof g_message, "%s%s   %d candidates — C-x o",
+               g_mb_prompt, g_mb_buf, n);
+      return;
+    }
     snprintf(g_message, sizeof g_message, "%s%s   {%s}", g_mb_prompt, g_mb_buf, list);
   }
 }
 
 int minibuffer_key(int key)
 {
+  if (g_mb_ctrl_x) {               /* the prompt swallows keys, so it has to
+                                      forward the chord — pane_other_window()
+                                      still decides where focus lands */
+    g_mb_ctrl_x = 0;
+    /* Window chords keep working while a prompt is up, as in Emacs: C-x o to
+       step into the list, C-x 1 to dismiss it and go back to one window. The
+       rest of C-x stays swallowed — C-x C-c or C-x C-s mid-prompt would be a
+       surprise, not a convenience. */
+    if (key == 'o' || key == 'O') pane_other_window();
+    else if (key == '1')          pane_unsplit_one();
+    else { mb_status(); return 1; }
+
+    if (completions_focused())        /* say what the keys do over there */
+      snprintf(g_message, sizeof g_message,
+               "*Completions* — Enter runs it, C-s searches, C-x o back, q closes");
+    else
+      mb_status();
+    return 1;
+  }
   if (g_mb_meta) {                 /* Esc (Meta) prefix is pending */
     g_mb_meta = 0;
     switch (key) {
@@ -279,16 +368,23 @@ int minibuffer_key(int key)
       while (g_mb_point < g_mb_len &&  isalnum((unsigned char)g_mb_buf[g_mb_point])) g_mb_point++;
       mb_status(); return 1;
     default:                                                     /* Esc-anything else cancels */
-      g_mb_active = 0; snprintf(g_message, sizeof g_message, "Quit"); return 1;
+      g_mb_active = 0; completions_hide();
+      snprintf(g_message, sizeof g_message, "Quit"); return 1;
     }
   }
   switch (key) {
+  case CACA_KEY_CTRL_X:                                          /* prefix; only C-x o here */
+    if (completions_open()) {
+      g_mb_ctrl_x = 1;
+      snprintf(g_message, sizeof g_message, "%s%s   C-x-", g_mb_prompt, g_mb_buf);
+    }
+    return 1;
   case CACA_KEY_ESCAPE: g_mb_meta = 1; mb_status(); return 1;    /* Meta prefix (Esc Esc cancels) */
   case CACA_KEY_RETURN:
   case 10: {
     void (*cb)(const char *) = g_mb_cb;
     char tmp[PATH_MAX];
-    g_mb_active = 0; g_message[0] = '\0';
+    g_mb_active = 0; completions_hide(); g_message[0] = '\0';
     strncpy(tmp, g_mb_buf, sizeof tmp - 1); tmp[sizeof tmp - 1] = '\0';
     if (cb) cb(tmp);
     return 1;
@@ -296,7 +392,8 @@ int minibuffer_key(int key)
   case CACA_KEY_TAB:    if (g_mb_complete == 2) minibuffer_complete_command();
                        else if (g_mb_complete) minibuffer_complete_path();
                        g_mb_point = g_mb_len; return 1;
-  case CACA_KEY_CTRL_G: g_mb_active = 0; snprintf(g_message, sizeof g_message, "Quit"); return 1;
+  case CACA_KEY_CTRL_G: g_mb_active = 0; completions_hide();
+                        snprintf(g_message, sizeof g_message, "Quit"); return 1;
   case CACA_KEY_LEFT:  case 2 /* C-b */:                            /* step over a whole UTF-8 char */
     if (g_mb_point > 0) { g_mb_point--; while (g_mb_point > 0 && ((unsigned char)g_mb_buf[g_mb_point] & 0xC0) == 0x80) g_mb_point--; }
     mb_status(); return 1;

@@ -115,7 +115,15 @@ int on_key(gtcaca_editor_widget_t *ed, int key, void *ud)
   if (g_isearch)     return isearch_key(ed, key);
   if (g_qr_active)   return query_replace_key(ed, key);
   if (g_spell_active) return spell_key(ed, key);
-  if (g_mb_active)   return minibuffer_key(key);
+  /* Completions window: while the caret is in it the prompt must stop
+     swallowing keys, so motion, C-s and the rest work there as in any buffer.
+     Only Enter and q/Esc mean something extra. */
+  if (completions_focused()) {
+    if (key == CACA_KEY_RETURN || key == 10) { completions_pick_at_point(); return 1; }
+    if (key == 'q' || key == CACA_KEY_ESCAPE) { completions_hide(); mb_status(); return 1; }
+  } else if (g_mb_active) {
+    return minibuffer_key(key);
+  }
 
   /* help viewer: read-only and scrollable — q/Esc close it, C-s searches, and
      arrows / PageUp / PageDown / C-v fall through to the editor for scrolling. */
