@@ -1017,6 +1017,17 @@ restart:
         }
       }
 
+    /* CCM_BIRDLOG=1 traces the physics — the same trick CCM_EVLOG and
+       CCM_DGMLOG use, and the only way to check a real-time game from a test
+       without racing its repaints. */
+    if (getenv("CCM_BIRDLOG")) {
+      int aim = -1;                          /* centre of the next gap ahead */
+      for (i = 0; i < npipe; i++)
+        if (pipes[i].x + BIRD_PIPE_W >= bird_x) { aim = pipes[i].gap_y + pipes[i].gap_h / 2; break; }
+      fprintf(stderr, "[bird] r=%d vel=%d speed=%d gap_h=%d score=%d pipes=%d aim=%d\n",
+              r, vel100, speed, gap_h, score, npipe, aim);
+    }
+
     /* ── collide ── */
     if (r >= ground) dead = 1;
     for (i = 0; i < npipe && !dead; i++)
@@ -1025,6 +1036,7 @@ restart:
         dead = 1;
 
     if (dead) {
+      if (getenv("CCM_BIRDLOG")) fprintf(stderr, "[bird] dead at r=%d score=%d\n", r, score);
       caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_RED); caca_set_attr(gmo.cv, CACA_BOLD);
       caca_printf(gmo.cv, W / 2 - 22, H / 2, "  DOWN  -  score %d  -  best %d  -  r restart, q quit  ", score, best);
       caca_refresh_display(gmo.dp);

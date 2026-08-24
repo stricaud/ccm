@@ -1,4 +1,7 @@
 #include "cacamacs.h"
+#ifndef _WIN32
+#include <termios.h>   /* VERASE — which key the tty calls erase */
+#endif
 #include "diagram.h"
 /* ── keyboard macros & numeric prefix ──────────────────────────────────────── */
 
@@ -41,6 +44,33 @@ int key_to_utf8(int key, char *out)
   return (int)n;
 }
 
+/* ── Del versus Backspace ───────────────────────────────────────────────────
+ * libcaca reports the Del key (ESC[3~, ncurses' KEY_DC) as CACA_KEY_DELETE,
+ * which is 0x7f — the same code the Backspace key produces on terminals where
+ * ncurses did not claim it. Treating the two alike is why Del used to erase
+ * backwards.
+ *
+ * ncurses claims the *tty's* erase character — termios VERASE, what `stty
+ * erase` sets — and returns it as KEY_BACKSPACE (CACA_KEY_BACKSPACE, 0x08),
+ * whatever terminfo's kbs says. So when the erase character is 0x7f, which it
+ * is nearly everywhere, a 0x7f still reaching us can only be Del. The
+ * exception is a terminal whose erase character is something else (`stty erase
+ * ^H`): there a raw 0x7f was never claimed by ncurses and is that keyboard's
+ * Backspace, so it has to keep erasing backwards. */
+int ccm_del_deletes_forward(void)
+{
+  static int cached = -1;
+  if (cached < 0) {
+#ifdef _WIN32
+    cached = 1;                       /* the console reports the two separately */
+#else
+    struct termios t;
+    cached = (tcgetattr(STDIN_FILENO, &t) == 0 && t.c_cc[VERASE] != 0x7f) ? 0 : 1;
+#endif
+  }
+  return cached;
+}
+
 /* Mirror the editor widget's default text handling for keys on_key ignores,
    so replaying a recorded key reproduces exactly what typing it would do. */
 void editor_default_key(gtcaca_editor_widget_t *ed, int key)
@@ -55,7 +85,11 @@ void editor_default_key(gtcaca_editor_widget_t *ed, int key)
   case CACA_KEY_PAGEUP:   gtcaca_editor_page_up(ed);    break;
   case CACA_KEY_PAGEDOWN: gtcaca_editor_page_down(ed);  break;
   case CACA_KEY_RETURN: case 10:                        gtcaca_editor_new_line(ed);    break;
-  case CACA_KEY_BACKSPACE: case CACA_KEY_DELETE:        gtcaca_editor_delete_back(ed); break;
+  case CACA_KEY_BACKSPACE:                              gtcaca_editor_delete_back(ed); break;
+  case CACA_KEY_DELETE:
+    if (ccm_del_deletes_forward()) gtcaca_editor_clear(ed);      /* forward, or the selection */
+    else                           gtcaca_editor_delete_back(ed);
+    break;
   case CACA_KEY_TAB:      gtcaca_editor_add_char(ed, '\t'); break;
   default:
     if (GTCACA_KEY_IS_UNICODE(key))   gtcaca_editor_add_char_utf32(ed, GTCACA_KEY_CODEPOINT(key));
@@ -241,8 +275,11 @@ int on_key(gtcaca_editor_widget_t *ed, int key, void *ud)
     case CACA_KEY_RIGHT:    move(ed, gtcaca_editor_word_right, gtcaca_editor_word_right_extend); return 1; /* M-Right = forward word */
     case CACA_KEY_LEFT:     move(ed, gtcaca_editor_word_left,  gtcaca_editor_word_left_extend);  return 1; /* M-Left  = back word    */
     case 'd': case 'D':     kill_word_right(ed); return 1;  /* M-d  kill word fwd  */
-    case CACA_KEY_BACKSPACE:
-    case CACA_KEY_DELETE:   kill_word_left(ed);  return 1;  /* M-DEL kill word back */
+    case CACA_KEY_BACKSPACE: kill_word_left(ed); return 1;   /* M-Backspace kill word back */
+    case CACA_KEY_DELETE:                                    /* M-Del: whichever way Del goes */
+      if (ccm_del_deletes_forward()) kill_word_right(ed);
+      else                           kill_word_left(ed);
+      return 1;
     case 'u': case 'U':     case_word(ed, 1);    return 1;  /* M-u  upcase word    */
     case 'l': case 'L':     case_word(ed, 0);    return 1;  /* M-l  downcase word  */
     case ';':               comment_dwim(ed);    return 1;  /* M-;  comment-dwim   */

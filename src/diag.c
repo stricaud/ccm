@@ -178,7 +178,7 @@ static void probe_keys(void)
   int c, seen_nul = 0, seen_meta = 0, count = 0;
   time_t until = time(NULL) + PROBE_SECONDS;
 
-  printf("\nKey probe — press Ctrl-Space, then M-w, then a letter (%d seconds)…\n",
+  printf("\nKey probe — press Ctrl-Space, M-w, Backspace, Del, then a letter (%d seconds)…\n",
          PROBE_SECONDS);
   fflush(stdout);
 
@@ -186,6 +186,10 @@ static void probe_keys(void)
     count++;
     if (c == 0x00)      { seen_nul = 1;  printf("  0x00  Ctrl-Space (set-mark)\n"); }
     else if (c == 0x1b) { seen_meta = 1; printf("  0x1b  Esc / Meta prefix\n"); }
+    /* Raw bytes, before ncurses gets to name them: the Del key arrives as the
+       escape sequence, the erase key as one byte. Which is which is exactly
+       what makes Del erase the wrong way when an app confuses them. */
+    else if (c == 0x7f) printf("  0x7f  Backspace (this tty's erase character)\n");
     else if (c < 0x20)  printf("  0x%02x  Ctrl-%c\n", c, '@' + c);
     else if (c < 0x7f)  printf("  0x%02x  '%c'\n", c, c);
     else                printf("  0x%02x\n", c);
@@ -237,6 +241,15 @@ int ccm_run_diag(const char *argv0)
   row("file descriptors", buf);
 
 #ifndef _WIN32
+  { struct termios t;                    /* which key this tty calls erase */
+    if (tcgetattr(STDIN_FILENO, &t) == 0) {
+      unsigned char e = t.c_cc[VERASE];
+      snprintf(buf, sizeof buf, "0x%02x (%s) — Del %s", e,
+               e == 0x7f ? "^?" : e == 0x08 ? "^H" : "?",
+               ccm_del_deletes_forward() ? "erases forward" : "erases backwards");
+      row("erase character", buf);
+    }
+  }
   { int fd = open("/dev/tty", O_WRONLY);
     have_tty = fd >= 0;
     row("/dev/tty", have_tty ? "open ok" : "unavailable");

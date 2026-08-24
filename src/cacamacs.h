@@ -267,6 +267,7 @@ void start_minibuffer_init(const char *prompt, void (*cb)(const char *), int com
    room for up to 4 bytes + NUL); returns the byte count, or 0 if key is not a
    Unicode codepoint. Used to self-insert accented input into char buffers. */
 int key_to_utf8(int key, char *out);
+int ccm_del_deletes_forward(void);   /* Del erases forward (see keymap.c) */
 void editor_default_key(gtcaca_editor_widget_t *ed, int key);
 void macro_execute(gtcaca_editor_widget_t *ed);
 void macro_feed(gtcaca_editor_widget_t *ed, int key);

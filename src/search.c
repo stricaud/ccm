@@ -355,8 +355,12 @@ int minibuffer_key(int key)
   if (g_mb_meta) {                 /* Esc (Meta) prefix is pending */
     g_mb_meta = 0;
     switch (key) {
-    case CACA_KEY_BACKSPACE: case CACA_KEY_DELETE:               /* M-DEL backward-kill-word */
+    case CACA_KEY_BACKSPACE:                                     /* M-Backspace: kill word back */
       mb_kill_word_left();  mb_status(); return 1;
+    case CACA_KEY_DELETE:                                        /* M-Del: whichever way Del goes */
+      if (ccm_del_deletes_forward()) mb_kill_word_right();
+      else                           mb_kill_word_left();
+      mb_status(); return 1;
     case 'd': case 'D':                                          /* M-d forward-kill-word */
       mb_kill_word_right(); mb_status(); return 1;
     case 'b': case 'B':                                          /* M-b / M-f word motion */
@@ -413,7 +417,19 @@ int minibuffer_key(int key)
       g_mb_len -= g_mb_point - start; g_mb_point = start;
     }
     mb_status(); return 1;
-  case CACA_KEY_DELETE: case 4 /* C-d */:                           /* delete whole char at point */
+  case CACA_KEY_DELETE:                        /* Del: forward here too, unless this
+                                                  terminal's Backspace is a raw 0x7f */
+    if (!ccm_del_deletes_forward()) {
+      if (g_mb_point > 0) {
+        int start = g_mb_point - 1;
+        while (start > 0 && ((unsigned char)g_mb_buf[start] & 0xC0) == 0x80) start--;
+        memmove(g_mb_buf + start, g_mb_buf + g_mb_point, (size_t)(g_mb_len - g_mb_point) + 1);
+        g_mb_len -= g_mb_point - start; g_mb_point = start;
+      }
+      mb_status(); return 1;
+    }
+    /* fall through */
+  case 4 /* C-d */:                                                /* delete whole char at point */
     if (g_mb_point < g_mb_len) {
       int end = g_mb_point + 1;
       while (end < g_mb_len && ((unsigned char)g_mb_buf[end] & 0xC0) == 0x80) end++;

@@ -187,9 +187,10 @@ int supersession_key(int key)
     super_done();
     ccm_revert_buffer(bi);
     break;
-  /* C-h *is* ASCII 0x08, which libcaca names CACA_KEY_BACKSPACE; the Backspace
-     key itself sends 0x7f (CACA_KEY_DELETE). Same split terminal Emacs lives
-     with, which is why C-h is its help key and DEL erases. */
+  /* C-h *is* ASCII 0x08, which libcaca names CACA_KEY_BACKSPACE — and ncurses
+     hands the tty's erase key over under the same name, so Backspace answers
+     here too. The same split terminal Emacs lives with, which is why C-h is its
+     help key and DEL erases (see ccm_del_deletes_forward in keymap.c). */
   case '?': case CACA_KEY_BACKSPACE:
     if (!g_super_help) { g_super_help = 1; show_help_with("Changed on disk", SUPER_HELP); }
     super_prompt();                 /* the question stays under the window */
