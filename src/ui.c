@@ -130,6 +130,7 @@ const char *help_text(void)
   "Repeat   C-u N <command>   runs the next command N times (bare C-u = 4)\n"
   "Windows  C-x 2 split below   C-x 3 split right   C-x 1 one   C-x 0 close\n"
   "         C-x o other window   C-x b switch buffer\n"
+  "         (a split shows the same file, same place, in both windows)\n"
   "Files    C-x C-f find file   C-x C-s save   C-x C-w write-as   C-x C-c quit\n"
   "         C-x d directory browser   M-x revert-buffer re-read from disk\n"
   "         a file changed by someone else is never overwritten or discarded\n"
@@ -411,6 +412,7 @@ int buffer_create(const char *path)
   b = &g_buffers[bi];
   memset(b, 0, sizeof *b);
   b->pane = -1;
+  b->view_of = -1;
   strcpy(b->langname, "fundamental");
   b->ed = gtcaca_editor_new(NULL, 0, 0, 1, 1);
   gtcaca_editor_set_line_numbers(b->ed, 1);
@@ -454,6 +456,61 @@ int buffer_create(const char *path)
     g_keywords = skw; g_n_keywords = snk; g_folding = sfold;
     strncpy(g_langname, sln, sizeof g_langname - 1); g_langname[sizeof g_langname - 1] = '\0';
   }
+  return bi;
+}
+
+/* A second buffer onto the file `src` is visiting, its editor a *view* of
+   src's: one document — same text, same undo history, same modified flag —
+   with a caret and a scroll position of its own. That is what lets one file be
+   open in two windows at once, since a buffer owns exactly one editor widget
+   and an editor widget can only be in one pane.
+
+   Everything the language and the look depend on is copied, and so is the
+   file's stamp: the two buffers visit the same file and must agree about what
+   is on disk, or saving through one would have the other asking whether the
+   file changed underneath it. */
+int buffer_create_view(int src)
+{
+  buffer_t *b, *sb;
+  int bi, root;
+
+  if (src < 0 || src >= g_nbuf) return -1;
+  sb = &g_buffers[src];
+  if (!sb->ed) return -1;
+
+  /* Views are cheap to keep and dear to make: one left over from an earlier
+     split of the same document is reused rather than a second one allocated,
+     which is what stops C-x 2 / C-x 1 from filling the buffer list with
+     identical spares. */
+  root = sb->is_view && sb->view_of >= 0 ? sb->view_of : src;
+  for (bi = 0; bi < g_nbuf; bi++) {
+    b = &g_buffers[bi];
+    if (b->is_view && b->pane < 0 && b->view_of == root && bi != src) {
+      gtcaca_editor_goto_pos(b->ed, gtcaca_editor_get_current_pos(sb->ed));
+      return bi;
+    }
+  }
+
+  if (g_nbuf >= MAXBUF) return -1;
+  bi = g_nbuf++;
+  b = &g_buffers[bi];
+  memset(b, 0, sizeof *b);
+  b->pane = -1;
+  b->is_view = 1;
+  b->view_of = root;
+  b->ed = gtcaca_editor_new_view(sb->ed, NULL, 0, 0, 1, 1);
+  if (!b->ed) { g_nbuf--; return -1; }
+  gtcaca_editor_key_cb_register(b->ed, on_key, NULL);
+  gtcaca_editor_set_update_cb(b->ed, refresh_modeline, NULL);
+  gtcaca_widget_hide(GTCACA_WIDGET(b->ed));
+
+  strncpy(b->path, sb->path, sizeof b->path - 1);
+  b->has_file = sb->has_file;
+  b->langcfg = sb->langcfg; b->grammar = sb->grammar;
+  b->keywords = sb->keywords; b->n_keywords = sb->n_keywords;
+  b->folding = sb->folding;
+  strncpy(b->langname, sb->langname, sizeof b->langname - 1);
+  b->stamp = sb->stamp;
   return bi;
 }
 
@@ -522,12 +579,29 @@ void relayout(void)
 }
 
 /* Show buffer bi in leaf node n. */
+/* Show buffer `bi` in pane `n`.
+
+   A buffer owns one editor widget, so it can only be in one pane at a time.
+   When it is already in another pane the two panes trade buffers rather than
+   the old one being emptied: asking for a file that is already on screen used
+   to leave the pane it came from blank (and focusing a blank pane read
+   g_buffers[-1]). Trading keeps every pane showing something. */
 void pane_show_buffer(int n, int bi)
 {
-  if (g_buffers[bi].pane >= 0 && g_buffers[bi].pane != n) g_nodes[g_buffers[bi].pane].buf = -1;
-  if (g_nodes[n].buf >= 0 && g_nodes[n].buf != bi) {
-    gtcaca_widget_hide(GTCACA_WIDGET(g_buffers[g_nodes[n].buf].ed));
-    g_buffers[g_nodes[n].buf].pane = -1;
+  int prev = g_nodes[n].buf;              /* what this pane is showing now */
+  int from = g_buffers[bi].pane;          /* where bi is showing, if anywhere */
+
+  if (from >= 0 && from != n && prev >= 0) {
+    g_nodes[from].buf = prev; g_buffers[prev].pane = from;
+    g_nodes[n].buf = bi;      g_buffers[bi].pane = n;
+    position_leaf(from);
+    position_leaf(n);
+    return;
+  }
+  if (from >= 0 && from != n) g_nodes[from].buf = -1;
+  if (prev >= 0 && prev != bi) {
+    gtcaca_widget_hide(GTCACA_WIDGET(g_buffers[prev].ed));
+    g_buffers[prev].pane = -1;
   }
   g_nodes[n].buf = bi; g_buffers[bi].pane = n;
   position_leaf(n);
@@ -538,7 +612,14 @@ void focus_pane(int n)   /* focus a leaf node */
   int bi, i;
   if (n < 0 || !g_nodes[n].used || !g_nodes[n].is_leaf) return;
   buffer_store_globals(g_cur_buf);
-  g_focus_leaf = n; bi = g_nodes[n].buf; g_cur_buf = bi;
+  bi = g_nodes[n].buf;
+  if (bi < 0) {                  /* an empty pane: give it a scratch buffer rather
+                                    than reading g_buffers[-1] below */
+    bi = buffer_create(NULL);
+    if (bi < 0) return;
+    pane_show_buffer(n, bi);
+  }
+  g_focus_leaf = n; g_cur_buf = bi;
   buffer_load_globals(bi);
   g_win = g_winpool[g_nodes[n].win]; g_ed = g_buffers[bi].ed;
   apply_indent_settings(g_buffers[bi].has_file ? strrchr(g_buffers[bi].path, '.') : NULL);
@@ -621,7 +702,15 @@ void pane_split_with(int newbuf, int rows)
   focus_pane(c0);
 }
 
-void pane_split(int rows) { pane_split_with(-1, rows); }
+/* C-x 2 / C-x 3. Emacs shows the same buffer in the new window, at the place
+   you were looking; here that is a second view of the current buffer. Focus
+   stays where it was. Should the view not be had, fall back to whatever buffer
+   is not on screen — the old behaviour. */
+void pane_split(int rows)
+{
+  int v = buffer_create_view(g_cur_buf);
+  pane_split_with(v, rows);
+}
 
 void pane_unsplit_one(void)
 {
@@ -687,7 +776,9 @@ void pane_switch_buffer(void)
   int k, bi = -1;
   for (k = 1; k <= g_nbuf; k++) {
     int c = (g_cur_buf + k) % g_nbuf;
-    if (c != g_cur_buf && g_buffers[c].pane < 0) { bi = c; break; }
+    /* a spare view is the document you are already looking at, not another
+       buffer to switch to */
+    if (c != g_cur_buf && g_buffers[c].pane < 0 && !g_buffers[c].is_view) { bi = c; break; }
   }
   if (bi < 0) { snprintf(g_message, sizeof g_message, "No other buffer"); return; }
   pane_show_buffer(g_focus_leaf, bi);

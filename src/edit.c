@@ -674,7 +674,14 @@ void write_buffer_file(gtcaca_editor_widget_t *ed)
   free(buf);
 
   gtcaca_editor_set_save_point(ed);
-  ccm_stamp_buffer(bi);            /* the file on disk is ours again */
+  /* Every buffer visiting this file is now as fresh as the file itself. A
+     second view of it (C-x 2) is a buffer of its own with its own stamp, and
+     would otherwise ask whether the file had changed underneath it — it had,
+     but we are the ones who changed it. */
+  { int i;
+    for (i = 0; i < g_nbuf; i++)
+      if (g_buffers[i].has_file && !strcmp(g_buffers[i].path, path)) ccm_stamp_buffer(i);
+    if (bi >= 0 && !g_buffers[bi].has_file) ccm_stamp_buffer(bi); }
   ccm_log_file('W', path);
   snprintf(g_message, sizeof(g_message), "Wrote %s", path);
 }

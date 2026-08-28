@@ -79,6 +79,8 @@ typedef struct {
   int                      n_keywords;
   int                      folding;
   int                      pane;
+  int                      is_view;    /* a second window onto view_of's document */
+  int                      view_of;    /* the buffer it was split from (-1 if none) */
   unsigned long            fold_sig;   /* edit count when last folded, +1 (0 = never) */
   ccm_stamp_t              stamp;      /* the file as of visiting it / last saving it */
   int                      was_modified; /* modify flag at the last modeline refresh */
@@ -305,6 +307,7 @@ void browser_modeline(gtcaca_editor_widget_t *ed, void *ud);
 void browser_open_current(void);
 int buf_index_of(gtcaca_editor_widget_t *ed);
 int buffer_create(const char *path);
+int buffer_create_view(int src);   /* a second window onto the buffer `src` */
 void buffer_load_globals(int bi);
 void buffer_store_globals(int bi);
 void collect_leaves(int n, int *out, int *cnt);

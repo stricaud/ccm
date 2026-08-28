@@ -39,6 +39,8 @@ Replace  M-% (Esc %)   (prompts: Search: … then Replace with: …)
 Windows  C-x 2 split the focused window below   C-x 3 split it right
          C-x 1 one window   C-x 0 close window   C-x o other   C-x b buffer
          (windows nest: split one pane without disturbing the others)
+         (a split shows the same file at the same place in both windows —
+          one document, two carets: editing either edits the file)
 Macros   C-x ( start recording   C-x ) finish   C-x e replay
          (C-u N C-x e replays N times, e.g. C-u 100 C-x e)
 Repeat   C-u N <command> runs the next command N times (bare C-u = 4):
