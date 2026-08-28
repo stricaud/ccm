@@ -100,13 +100,16 @@ static int ends_with(const char *s, int n, const char *suf)
   return n >= m && !strcmp(s + n - m, suf);
 }
 
-static int is_correct(const char *word)
+/* Shared with wordguess (games.c), which needs the same answer to the same
+   question: is this a word? */
+int ccm_word_is_correct(const char *word)
 {
   static const char *suf[] = { "ings", "ing", "edly", "ed", "es", "s",
                                "ly", "ers", "er", "est", "ness", "ment", "ful", NULL };
   char low[80], base[80];
   int n, i, bl;
 
+  dict_load();                         /* callers other than spell_word rely on this */
   lower_copy(word, low, sizeof low);
   n = (int)strlen(low);
   if (n == 0) return 0;
@@ -231,7 +234,7 @@ void spell_word(gtcaca_editor_widget_t *ed)
   n = word_at_point(ed, &ws, &we, word, sizeof word);
   if (n == 0) { snprintf(g_message, sizeof g_message, "No word at point"); return; }
 
-  if (is_correct(word)) { snprintf(g_message, sizeof g_message, "\"%s\" is correct", word); return; }
+  if (ccm_word_is_correct(word)) { snprintf(g_message, sizeof g_message, "\"%s\" is correct", word); return; }
 
   lower_copy(word, low, sizeof low);
   g_spell_nsugg = 0;

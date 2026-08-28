@@ -158,10 +158,15 @@ extern int g_spell_active;       /* spell-check suggestion picker is up */
 extern int g_mb_active;
 extern int g_super_active;       /* the "changed on disk; really edit?" question is up */
 
+/* spell.c — is this a word? The dictionary is a base-word list, so a plausible
+   inflection of a word in it (plurals, -ed, -ing) counts as one too. */
+int ccm_word_is_correct(const char *word);
+
 /* games (games.c) */
 void run_snake(void);
 void run_sokoban(void);
 void run_bird(void);
+void run_wordguess(int wild);   /* wild: draw the answer from the whole dictionary */
 
 /* functions */
 /* edit.c */

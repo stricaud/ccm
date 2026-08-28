@@ -1,4 +1,4 @@
-/* games.c — snake, sokoban and bird, split out of cacamacs.c. They are
+/* games.c — snake, sokoban, bird and wordguess, split out of cacamacs.c. They are
    self-contained game loops; the only shared symbol is g_message. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1050,6 +1050,527 @@ restart:
   }
 
   snprintf(g_message, sizeof g_message, "Bird: final score %d (best %d)", score, best);
+  gtcaca_redraw();
+  caca_refresh_display(gmo.dp);
+}
+
+
+/* ── wordguess (M-x wordguess) ──────────────────────────────────────────────
+ * Letters are drawn from a 5x5 bitmap font, a cell to the pixel, in tiles
+ * five columns wide. 
+ *
+ * The answer comes from a built-in list of everyday words, so the game stays
+ * winnable; `M-x wordguess-wild` draws it from the whole of the system
+ * dictionary instead, obscurities and all. A guess only has to be a word: the
+ * built-in list, or anything M-$ would spell-check as correct. */
+
+#define WG_ROWS 6
+#define WG_COLS 5
+#define WG_DICT_PATH "/usr/share/dict/words"
+
+enum { WG_EMPTY = 0, WG_PENDING, WG_ABSENT, WG_PRESENT, WG_CORRECT };
+
+/* 5x5 glyphs, a..z, one string per pixel row; '#' is ink. */
+static const char *const wg_font[26][5] = {
+  { ".###.", "#...#", "#####", "#...#", "#...#" },   /* a */
+  { "####.", "#...#", "####.", "#...#", "####." },   /* b */
+  { ".####", "#....", "#....", "#....", ".####" },   /* c */
+  { "####.", "#...#", "#...#", "#...#", "####." },   /* d */
+  { "#####", "#....", "####.", "#....", "#####" },   /* e */
+  { "#####", "#....", "####.", "#....", "#...." },   /* f */
+  { ".####", "#....", "#..##", "#...#", ".###." },   /* g */
+  { "#...#", "#...#", "#####", "#...#", "#...#" },   /* h */
+  { "#####", "..#..", "..#..", "..#..", "#####" },   /* i */
+  { "..###", "...#.", "...#.", "#..#.", ".##.." },   /* j */
+  { "#...#", "#..#.", "###..", "#..#.", "#...#" },   /* k */
+  { "#....", "#....", "#....", "#....", "#####" },   /* l */
+  { "#...#", "##.##", "#.#.#", "#...#", "#...#" },   /* m */
+  { "#...#", "##..#", "#.#.#", "#..##", "#...#" },   /* n */
+  { ".###.", "#...#", "#...#", "#...#", ".###." },   /* o */
+  { "####.", "#...#", "####.", "#....", "#...." },   /* p */
+  { ".###.", "#...#", "#.#.#", "#..#.", ".##.#" },   /* q */
+  { "####.", "#...#", "####.", "#..#.", "#...#" },   /* r */
+  { ".####", "#....", ".###.", "....#", "####." },   /* s */
+  { "#####", "..#..", "..#..", "..#..", "..#.." },   /* t */
+  { "#...#", "#...#", "#...#", "#...#", ".###." },   /* u */
+  { "#...#", "#...#", "#...#", ".#.#.", "..#.." },   /* v */
+  { "#...#", "#...#", "#.#.#", "##.##", "#...#" },   /* w */
+  { "#...#", ".#.#.", "..#..", ".#.#.", "#...#" },   /* x */
+  { "#...#", ".#.#.", "..#..", "..#..", "..#.." },   /* y */
+  { "#####", "...#.", "..#..", ".#...", "#####" }    /* z */
+};
+
+/* Everyday five-letter words: the pool answers are drawn from, and always
+   accepted as a guess even when there is no system dictionary to check
+   against (Windows has none). */
+static const char *const wg_common[] = {
+  "about", "above", "abuse", "actor", "acute", "admit", "adopt", "adult", "after", "again",
+  "agent", "agree", "ahead", "alarm", "album", "alert", "alike", "alive", "allow", "alone",
+  "along", "alter", "among", "anger", "angle", "angry", "apart", "apple", "apply", "arena",
+  "argue", "arise", "armor", "array", "arrow", "aside", "asset", "audio", "audit", "avoid",
+  "awake", "award", "aware", "badly", "baker", "basic", "basis", "beach", "beard", "beast",
+  "begin", "being", "below", "bench", "birth", "black", "blade", "blame", "blank", "blast",
+  "blend", "bless", "blind", "block", "blood", "board", "boast", "bonus", "boost", "booth",
+  "bound", "brain", "brand", "brave", "bread", "break", "breed", "brick", "bride", "brief",
+  "bring", "broad", "broke", "brown", "brush", "build", "built", "bunch", "burnt", "burst",
+  "buyer", "cabin", "cable", "camel", "canal", "candy", "cargo", "carry", "carve", "catch",
+  "cause", "cease", "chain", "chair", "chalk", "charm", "chart", "chase", "cheap", "cheat",
+  "check", "cheek", "cheer", "chess", "chest", "chief", "child", "chill", "china", "choir",
+  "chose", "chunk", "cider", "civil", "claim", "clash", "class", "clean", "clear", "clerk",
+  "click", "cliff", "climb", "clock", "close", "cloth", "cloud", "clown", "coach", "coast",
+  "cobra", "color", "comic", "coral", "couch", "cough", "could", "count", "court", "cover",
+  "crack", "craft", "crane", "crash", "crawl", "crazy", "cream", "creek", "crest", "crime",
+  "crisp", "cross", "crowd", "crown", "crude", "cruel", "crush", "crust", "curve", "cycle",
+  "daily", "dairy", "dance", "dated", "dealt", "death", "debut", "decay", "decor", "delay",
+  "delta", "dense", "depth", "devil", "diary", "dirty", "ditch", "diver", "dizzy", "dodge",
+  "doing", "donor", "doubt", "dozen", "draft", "drain", "drama", "drank", "dream", "dress",
+  "dried", "drift", "drill", "drink", "drive", "drove", "drown", "drunk", "dryer", "eager",
+  "eagle", "early", "earth", "eight", "elbow", "elder", "elect", "elite", "empty", "enemy",
+  "enjoy", "enter", "entry", "equal", "error", "essay", "event", "every", "exact", "exile",
+  "exist", "extra", "fable", "faint", "fairy", "faith", "false", "fancy", "fatal", "fault",
+  "favor", "feast", "fence", "fever", "fewer", "fiber", "field", "fiery", "fifth", "fifty",
+  "fight", "final", "first", "flame", "flash", "fleet", "flesh", "flick", "fling", "flint",
+  "float", "flock", "flood", "floor", "flour", "fluid", "flush", "focal", "focus", "force",
+  "forge", "forth", "forty", "forum", "found", "frame", "fraud", "fresh", "fried", "front",
+  "frost", "fruit", "fully", "funny", "giant", "giver", "glass", "gleam", "globe", "gloom",
+  "glory", "glove", "going", "grace", "grade", "grain", "grand", "grant", "grape", "graph",
+  "grasp", "grass", "grave", "great", "greed", "green", "greet", "grief", "grill", "grind",
+  "groan", "groom", "group", "grove", "growl", "guard", "guess", "guest", "guide", "guilt",
+  "habit", "handy", "happy", "harsh", "haunt", "heart", "heavy", "hedge", "hello", "hence",
+  "hobby", "honey", "honor", "horse", "hotel", "house", "hover", "human", "humor", "hurry",
+  "ideal", "image", "imply", "index", "inner", "input", "irony", "issue", "ivory", "jelly",
+  "jewel", "joint", "jolly", "judge", "juice", "jumbo", "kneel", "knife", "knock", "known",
+  "label", "labor", "lance", "large", "laser", "later", "laugh", "layer", "learn", "lease",
+  "least", "leave", "legal", "lemon", "level", "lever", "light", "limit", "linen", "liner",
+  "liver", "lobby", "local", "lodge", "logic", "loose", "loser", "lover", "lower", "loyal",
+  "lucky", "lunar", "lunch", "lying", "magic", "major", "maker", "mango", "maple", "march",
+  "marsh", "match", "mayor", "meant", "medal", "media", "mercy", "merge", "merit", "metal",
+  "meter", "midst", "might", "minor", "minus", "mixed", "model", "moist", "money", "month",
+  "moral", "motor", "mount", "mouse", "mouth", "movie", "music", "naive", "nasty", "naval",
+  "nerve", "never", "newly", "night", "noble", "noise", "north", "notch", "novel", "nurse",
+  "ocean", "offer", "often", "olive", "onion", "opera", "orbit", "order", "organ", "other",
+  "otter", "ought", "ounce", "outer", "owner", "ozone", "paint", "panel", "panic", "paper",
+  "party", "pasta", "patch", "pause", "peace", "peach", "pearl", "pedal", "penny", "perch",
+  "phase", "phone", "photo", "piano", "piece", "pilot", "pinch", "pitch", "pivot", "pixel",
+  "pizza", "place", "plain", "plane", "plant", "plate", "plaza", "pluck", "point", "polar",
+  "porch", "pound", "power", "press", "price", "pride", "prime", "print", "prior", "prize",
+  "probe", "prone", "proof", "proud", "prove", "prune", "pulse", "punch", "pupil", "puppy",
+  "purse", "queen", "query", "quest", "queue", "quick", "quiet", "quilt", "quite", "quota",
+  "radar", "radio", "raise", "rally", "ranch", "range", "rapid", "ratio", "razor", "reach",
+  "react", "ready", "realm", "rebel", "refer", "reign", "relax", "relay", "renew", "repay",
+  "reply", "rider", "ridge", "rifle", "right", "rigid", "rinse", "risen", "risky", "rival",
+  "river", "roast", "robot", "rocky", "rogue", "rotor", "rough", "round", "route", "royal",
+  "rugby", "ruler", "rumor", "rural", "sadly", "saint", "salad", "salon", "sauce", "scale",
+  "scare", "scarf", "scene", "scent", "scope", "score", "scout", "scrap", "screw", "sense",
+  "serve", "seven", "shade", "shaft", "shake", "shall", "shame", "shape", "share", "shark",
+  "sharp", "sheep", "sheet", "shelf", "shell", "shift", "shine", "shirt", "shock", "shoot",
+  "shore", "short", "shout", "shown", "shrug", "siege", "sight", "sigma", "silly", "since",
+  "siren", "sixth", "skill", "skirt", "skull", "slate", "sleep", "slice", "slide", "slope",
+  "small", "smart", "smash", "smell", "smile", "smoke", "snack", "snake", "sneak", "solar",
+  "solid", "solve", "sorry", "sound", "south", "space", "spare", "spark", "speak", "speed",
+  "spell", "spend", "spent", "spice", "spike", "spill", "spine", "spite", "split", "spoil",
+  "spoke", "spoon", "sport", "spray", "squad", "stack", "staff", "stage", "stain", "stair",
+  "stake", "stall", "stamp", "stand", "stare", "start", "state", "steak", "steal", "steam",
+  "steel", "steep", "steer", "stern", "stick", "stiff", "still", "sting", "stock", "stone",
+  "stood", "stool", "store", "storm", "story", "stove", "strap", "straw", "strip", "stuck",
+  "study", "stuff", "style", "sugar", "suite", "sunny", "super", "surge", "sweat", "sweep",
+  "sweet", "swift", "swing", "sword", "syrup", "table", "taken", "tally", "tango", "taste",
+  "teach", "tempo", "tenth", "thank", "theft", "their", "theme", "there", "these", "thick",
+  "thief", "thigh", "thing", "think", "third", "those", "three", "throw", "thumb", "tiger",
+  "tight", "timer", "tired", "title", "toast", "today", "token", "tonic", "tooth", "topic",
+  "torch", "total", "touch", "tough", "towel", "tower", "toxic", "trace", "track", "trade",
+  "trail", "train", "trait", "trash", "treat", "trend", "trial", "tribe", "trick", "tried",
+  "trout", "truck", "truly", "trunk", "trust", "truth", "tulip", "tumor", "tutor", "twice",
+  "twist", "ultra", "uncle", "under", "union", "unite", "unity", "until", "upper", "upset",
+  "urban", "usage", "usual", "vague", "valid", "value", "valve", "vapor", "vault", "venue",
+  "verse", "video", "vigor", "villa", "vinyl", "viral", "virus", "visit", "vital", "vivid",
+  "vocal", "vodka", "voice", "voter", "wagon", "waist", "waste", "watch", "water", "weary",
+  "weave", "wedge", "weigh", "weird", "whale", "wheat", "wheel", "where", "which", "while",
+  "white", "whole", "whose", "widow", "width", "witch", "woman", "world", "worry", "worse",
+  "worst", "worth", "would", "wound", "wrist", "write", "wrong", "yacht", "yeast", "yield",
+  "young", "yours", "youth", "zebra"
+};
+#define WG_NCOMMON ((int)(sizeof wg_common / sizeof *wg_common))
+
+/* ── word lists ─────────────────────────────────────────────────────────────
+ * Guesses are checked by the spell checker (see wg_is_word). What is read here
+ * is only the pool a *wild* answer is drawn from: the system dictionary
+ * filtered down to its five-letter lowercase words, read once and kept for the
+ * session. It is sorted here rather than trusted to be sorted — the file's own
+ * order is case-insensitive and varies between systems. */
+static char **wg_dict = NULL;
+static int    wg_dict_n = 0;
+static int    wg_dict_tried = 0;
+
+static int wg_cmp(const void *a, const void *b)
+{
+  return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static void wg_load_dict(void)
+{
+  FILE *f;
+  char line[128];
+  int cap = 0;
+
+  if (wg_dict_tried) return;
+  wg_dict_tried = 1;
+
+  f = fopen(WG_DICT_PATH, "r");
+  if (!f) return;
+  while (fgets(line, sizeof line, f)) {
+    char *w;
+    int n = 0;
+    while (line[n] && line[n] >= 'a' && line[n] <= 'z') n++;
+    if (n != WG_COLS || (line[n] && line[n] != '\n' && line[n] != '\r')) continue;
+    if (wg_dict_n == cap) {
+      int ncap = cap ? cap * 2 : 1024;
+      char **t = realloc(wg_dict, sizeof *t * (size_t)ncap);
+      if (!t) break;
+      wg_dict = t; cap = ncap;
+    }
+    w = malloc(WG_COLS + 1);
+    if (!w) break;
+    memcpy(w, line, WG_COLS); w[WG_COLS] = '\0';
+    wg_dict[wg_dict_n++] = w;
+  }
+  fclose(f);
+  if (wg_dict_n) qsort(wg_dict, (size_t)wg_dict_n, sizeof *wg_dict, wg_cmp);
+}
+
+/* Is `w` a word we accept as a guess? The built-in list first — it has the
+   everyday words web2 is missing (pasta, pixel, rugby) — and then the spell
+   checker, which is the same question M-$ answers and knows that a base-word
+   dictionary holding "lawn" but not "lawns" still makes "lawns" a word. */
+static int wg_is_word(const char *w)
+{
+  int lo = 0, hi = WG_NCOMMON - 1;
+  while (lo <= hi) {                                   /* wg_common is sorted */
+    int mid = (lo + hi) / 2, c = strcmp(wg_common[mid], w);
+    if (!c) return 1;
+    if (c < 0) lo = mid + 1; else hi = mid - 1;
+  }
+  return ccm_word_is_correct(w);
+}
+
+/* the answer: an everyday word, or - wild - anything the dictionary holds */
+static void wg_pick(char *out, int wild)
+{
+  const char *w;
+  if (wild && wg_dict_n) w = wg_dict[rand() % wg_dict_n];
+  else                   w = wg_common[rand() % WG_NCOMMON];
+  memcpy(out, w, WG_COLS); out[WG_COLS] = '\0';
+}
+
+/* ── drawing ────────────────────────────────────────────────────────────────
+ * Every cell of the board is a full block █ drawn in its own colour on that
+ * same colour, so it comes out solid however the display renders the glyph:
+ * libcaca's ncurses driver has its own idea of what a block element looks
+ * like and substitutes ▮ for every one of them. Painting a space on a coloured
+ * background would come out solid too, but some drivers do not repaint a cell
+ * whose only change is its background — hence a real glyph. */
+
+typedef struct {
+  int tw, th;        /* tile size, in cells */
+  int rows;          /* rows of the font a letter gets; 0 = one character */
+  int vgap;          /* blank rows between one row of tiles and the next */
+  int ox, oy;        /* top-left corner of the board */
+  int kbd, ky;       /* draw the on-screen keyboard, and the row it starts on */
+  int msgy;          /* the row messages are written on */
+  int cx;            /* centre column of the window */
+} wg_layout_t;
+
+static void wg_fill(int x, int y, int w, int h, uint8_t colour)
+{
+  int i, j;
+  caca_set_color_ansi(gmo.cv, colour, colour);
+  caca_set_attr(gmo.cv, 0);
+  for (j = 0; j < h; j++)
+    for (i = 0; i < w; i++)
+      caca_put_char(gmo.cv, x + i, y + j, 0x2588);          /* █ */
+}
+
+/* Empty slot: a thin frame */
+static void wg_frame(int x, int y, int w, int h, uint8_t colour)
+{
+  int i, j;
+  caca_set_color_ansi(gmo.cv, colour, CACA_BLACK);
+  caca_set_attr(gmo.cv, 0);
+  for (i = 1; i < w - 1; i++) {
+    caca_put_char(gmo.cv, x + i, y, 0x2500);                /* ─ */
+    caca_put_char(gmo.cv, x + i, y + h - 1, 0x2500);
+  }
+  for (j = 1; j < h - 1; j++) {
+    caca_put_char(gmo.cv, x, y + j, 0x2502);                /* │ */
+    caca_put_char(gmo.cv, x + w - 1, y + j, 0x2502);
+  }
+  caca_put_char(gmo.cv, x,         y,         0x250C);      /* ┌ */
+  caca_put_char(gmo.cv, x + w - 1, y,         0x2510);      /* ┐ */
+  caca_put_char(gmo.cv, x,         y + h - 1, 0x2514);      /* └ */
+  caca_put_char(gmo.cv, x + w - 1, y + h - 1, 0x2518);      /* ┘ */
+}
+
+/* one glyph, a cell to the pixel. `rows` is 5, or 4 to leave out the font's
+   fourth row — the crossbar sits above it, so it is the row a letter can lose
+   and still be read. */
+static void wg_glyph(int x, int y, int ch, int rows, uint8_t ink, uint8_t bg)
+{
+  const char *const *g = wg_font[ch - 'a'];
+  int col, row;
+  caca_set_attr(gmo.cv, 0);
+  for (row = 0; row < rows; row++) {
+    const char *px = g[rows == 5 ? row : (row < 3 ? row : 4)];
+    for (col = 0; col < WG_COLS; col++) {
+      uint8_t c = px[col] == '#' ? ink : bg;
+      caca_set_color_ansi(gmo.cv, c, c);
+      caca_put_char(gmo.cv, x + col, y + row, 0x2588);      /* █ */
+    }
+  }
+}
+
+static void wg_colours(int state, uint8_t *bg, uint8_t *ink)
+{
+  switch (state) {
+  case WG_CORRECT: *bg = CACA_GREEN;    *ink = CACA_WHITE; break;
+  case WG_PRESENT: *bg = CACA_BROWN;    *ink = CACA_WHITE; break;
+  case WG_ABSENT:  *bg = CACA_DARKGRAY; *ink = CACA_WHITE; break;
+  default:         *bg = CACA_BLACK;    *ink = CACA_WHITE; break;   /* typed, not yet guessed */
+  }
+}
+
+static void wg_tile(const wg_layout_t *L, int r, int c, int ch, int state)
+{
+  int x = L->ox + c * (L->tw + 1);
+  int y = L->oy + r * (L->th + L->vgap);
+  uint8_t bg, ink;
+
+  if (!ch) {                                        /* an empty slot: an outline */
+    if (L->th > 1) wg_frame(x, y, L->tw, L->th, CACA_DARKGRAY);
+    else {
+      caca_set_color_ansi(gmo.cv, CACA_DARKGRAY, CACA_BLACK);
+      caca_set_attr(gmo.cv, 0);
+      caca_put_char(gmo.cv, x + L->tw / 2, y, '.');
+    }
+    return;
+  }
+  wg_colours(state, &bg, &ink);
+  wg_fill(x, y, L->tw, L->th, bg);
+  if (L->rows) {
+    wg_glyph(x + (L->tw - WG_COLS) / 2, y, ch, L->rows, ink, bg);
+  } else {
+    caca_set_color_ansi(gmo.cv, ink, bg);
+    caca_set_attr(gmo.cv, CACA_BOLD);
+    caca_put_char(gmo.cv, x + L->tw / 2, y, (uint32_t)(ch - 'a' + 'A'));
+  }
+}
+
+static const char *const wg_keyrows[3] = { "qwertyuiop", "asdfghjkl", "zxcvbnm" };
+
+/* the keyboard, coloured with what has been ruled in or out so far */
+static void wg_draw_keyboard(const wg_layout_t *L, const char *seen)
+{
+  int kw = L->rows ? 3 : 1, row, i;
+  for (row = 0; row < 3; row++) {
+    int n = (int)strlen(wg_keyrows[row]);
+    int x = L->cx - (n * (kw + 1) - 1) / 2;
+    for (i = 0; i < n; i++, x += kw + 1) {
+      int ch = wg_keyrows[row][i];
+      uint8_t bg, ink;
+      switch (seen[ch - 'a']) {
+      case WG_CORRECT: bg = CACA_GREEN;     ink = CACA_BLACK; break;
+      case WG_PRESENT: bg = CACA_BROWN;     ink = CACA_BLACK; break;
+      case WG_ABSENT:  bg = CACA_DARKGRAY;  ink = CACA_LIGHTGRAY; break;
+      default:         bg = CACA_LIGHTGRAY; ink = CACA_BLACK; break;
+      }
+      wg_fill(x, L->ky + row, kw, 1, bg);
+      caca_set_color_ansi(gmo.cv, ink, bg);
+      caca_set_attr(gmo.cv, CACA_BOLD);
+      caca_put_char(gmo.cv, x + kw / 2, L->ky + row, (uint32_t)(ch - 'a' + 'A'));
+    }
+  }
+}
+
+/* ── scoring ────────────────────────────────────────────────────────────────
+ * Two passes, because a letter of the answer can only be claimed once: the
+ * greens are taken first, and only what is left over can turn a later
+ * duplicate amber. Guessing "sassy" against "basil" greens the middle S and
+ * greys the other two — the answer's only S has already been claimed. */
+static void wg_score(const char *guess, const char *answer, char *out)
+{
+  int used[WG_COLS] = { 0 }, i, j;
+  for (i = 0; i < WG_COLS; i++)
+    if (guess[i] == answer[i]) { out[i] = WG_CORRECT; used[i] = 1; }
+    else                         out[i] = WG_ABSENT;
+  for (i = 0; i < WG_COLS; i++) {
+    if (out[i] == WG_CORRECT) continue;
+    for (j = 0; j < WG_COLS; j++)
+      if (!used[j] && guess[i] == answer[j]) { out[i] = WG_PRESENT; used[j] = 1; break; }
+  }
+}
+
+/* the biggest board that fits, and where everything around it goes. The sizes
+   are tried in order: five-row letters, four-row letters, four-row letters with
+   the rows of tiles touching, then one character to a tile. */
+static int wg_layout(wg_layout_t *L, int W, int H)
+{
+  static const struct { int rows, th, tw, vgap; } sizes[] = {
+    { 5, 5, 7, 1 }, { 4, 4, 7, 1 }, { 4, 4, 7, 0 }, { 0, 1, 3, 1 }
+  };
+  int i;
+
+  L->cx = W / 2;
+  for (i = 0; i < (int)(sizeof sizes / sizeof *sizes); i++) {
+    int bw = WG_COLS * (sizes[i].tw + 1) - 1;
+    int bh = WG_ROWS * (sizes[i].th + sizes[i].vgap) - sizes[i].vgap;
+    if (W < bw + 2 || H < bh + 3) continue;        /* + a title, a gap, a message */
+    L->rows = sizes[i].rows; L->th = sizes[i].th;
+    L->tw = sizes[i].tw;     L->vgap = sizes[i].vgap;
+    L->ox = L->cx - bw / 2;
+    L->kbd = H >= bh + 7;                          /* room for three rows of keys */
+    L->oy = 2 + ((H - 2) - bh - (L->kbd ? 4 : 0) - 1) / 2;
+    if (L->oy < 2) L->oy = 2;
+    L->ky = L->oy + bh + 2;
+    L->msgy = L->kbd ? L->ky + 3 : L->oy + bh + 1;
+    if (L->msgy > H - 1) L->msgy = H - 1;
+    return 1;
+  }
+  return 0;
+}
+
+static void wg_centre(int y, uint8_t fg, uint8_t bg, int bold, int cx, const char *s)
+{
+  caca_set_color_ansi(gmo.cv, fg, bg);
+  caca_set_attr(gmo.cv, bold ? CACA_BOLD : 0);
+  caca_printf(gmo.cv, cx - (int)strlen(s) / 2, y, "%s", s);
+}
+
+/* how well you did, in the spirit of the original */
+static const char *wg_praise(int tries)
+{
+  static const char *const p[WG_ROWS] =
+    { "Genius", "Magnificent", "Impressive", "Splendid", "Great", "Phew" };
+  return p[tries - 1];
+}
+
+void run_wordguess(int wild)
+{
+  int W = caca_get_canvas_width(gmo.cv), H = caca_get_canvas_height(gmo.cv);
+  static int seeded = 0;
+  wg_layout_t L;
+  char answer[WG_COLS + 1];
+  char guess[WG_ROWS][WG_COLS + 1];
+  char mark[WG_ROWS][WG_COLS];
+  char seen[26];
+  char msg[80];
+  int row = 0, col = 0, over = 0, won = 0, running = 1, played = 0, wins = 0;
+  caca_event_t ev;
+
+  if (!wg_layout(&L, W, H)) {
+    snprintf(g_message, sizeof g_message, "Window too small for wordguess");
+    return;
+  }
+  if (!seeded) { srand((unsigned)time(NULL)); seeded = 1; }
+  if (wild) wg_load_dict();
+
+new_game:
+  memset(guess, 0, sizeof guess);
+  memset(mark, 0, sizeof mark);
+  memset(seen, WG_EMPTY, sizeof seen);
+  row = col = over = won = 0;
+  msg[0] = '\0';
+  {
+    /* CCM_WORDGUESS fixes the answer, so a test can play a whole game — the
+       same trick CCM_EVLOG and CCM_BIRDLOG use to make a game reproducible. */
+    const char *forced = getenv("CCM_WORDGUESS");
+    if (forced && strlen(forced) == WG_COLS) {
+      memcpy(answer, forced, WG_COLS); answer[WG_COLS] = '\0';
+    } else wg_pick(answer, wild);
+  }
+
+  while (running) {
+    int r, c, k, nw = caca_get_canvas_width(gmo.cv), nh = caca_get_canvas_height(gmo.cv);
+
+    if (nw != W || nh != H) {                 /* the window was resized under us */
+      wg_layout_t n;
+      if (wg_layout(&n, nw, nh)) { L = n; W = nw; H = nh; }
+    }
+
+    /* ── draw ── */
+    game_fill_bg();
+    caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK);
+    caca_set_attr(gmo.cv, 0);
+    caca_printf(gmo.cv, 1, 0, "WORDGUESS%s   try %d/%d   won %d/%d   (type a word, Enter guesses, Esc quits)",
+                wild ? " (wild)" : "", over ? row : row + 1, WG_ROWS, wins, played);
+
+    for (r = 0; r < WG_ROWS; r++)
+      for (c = 0; c < WG_COLS; c++) {
+        int ch = guess[r][c];
+        int state = r < row ? mark[r][c] : WG_PENDING;
+        wg_tile(&L, r, c, ch, state);
+      }
+    if (L.kbd) wg_draw_keyboard(&L, seen);
+
+    if (over) {
+      char line[80];
+      /* ASCII only: the ncurses driver has no glyph for an em dash and draws
+         a question mark in its place. */
+      if (won) snprintf(line, sizeof line, " %s in %d/%d  (Enter plays again, q quits) ",
+                        wg_praise(row), row, WG_ROWS);
+      else     snprintf(line, sizeof line, " The word was %s  (Enter plays again, q quits) ", answer);
+      if ((int)strlen(line) > W) {                /* narrow window: say it shorter */
+        if (won) snprintf(line, sizeof line, " %s %d/%d  (Enter, q) ", wg_praise(row), row, WG_ROWS);
+        else     snprintf(line, sizeof line, " It was %s  (Enter, q) ", answer);
+      }
+      wg_centre(L.msgy, won ? CACA_BLACK : CACA_WHITE, won ? CACA_GREEN : CACA_RED, 1, L.cx, line);
+    } else if (msg[0]) {
+      wg_centre(L.msgy, CACA_YELLOW, CACA_BLACK, 1, L.cx, msg);
+    }
+    caca_refresh_display(gmo.dp);
+
+    /* ── input ── */
+    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
+    k = caca_get_event_key_ch(&ev);
+    if (k >= 'A' && k <= 'Z') k = k - 'A' + 'a';
+    msg[0] = '\0';
+
+    if (k == CACA_KEY_ESCAPE || k == CACA_KEY_CTRL_G) break;
+
+    if (over) {
+      if (k == 'q') break;
+      if (k == '\n' || k == CACA_KEY_RETURN || k == ' ' || k == 'n') goto new_game;
+      continue;
+    }
+
+    if (k >= 'a' && k <= 'z') {
+      if (col < WG_COLS) guess[row][col++] = (char)k;
+      continue;
+    }
+    if (k == CACA_KEY_BACKSPACE || k == CACA_KEY_DELETE) {
+      if (col > 0) guess[row][--col] = '\0';
+      continue;
+    }
+    if (k != '\n' && k != CACA_KEY_RETURN) continue;
+
+    /* ── a guess ── */
+    if (col < WG_COLS) { snprintf(msg, sizeof msg, " Not enough letters "); continue; }
+    if (!wg_is_word(guess[row])) {
+      snprintf(msg, sizeof msg, " %s is not a word I know ", guess[row]);
+      continue;
+    }
+    wg_score(guess[row], answer, mark[row]);
+    for (c = 0; c < WG_COLS; c++) {                  /* the keyboard only ever improves */
+      int i = guess[row][c] - 'a';
+      if (mark[row][c] > seen[i]) seen[i] = mark[row][c];
+    }
+    won = !strcmp(guess[row], answer);
+    row++; col = 0;
+    if (won || row == WG_ROWS) { over = 1; played++; if (won) wins++; }
+  }
+
+  if (played)
+    snprintf(g_message, sizeof g_message, "Wordguess: %d of %d", wins, played);
+  else
+    snprintf(g_message, sizeof g_message, "Wordguess: the word was %s", answer);
   gtcaca_redraw();
   caca_refresh_display(gmo.dp);
 }
