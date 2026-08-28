@@ -514,6 +514,40 @@ int buffer_create_view(int src)
   return bi;
 }
 
+/* The buffers sharing one document are one file shown several times, so when
+   the focused one takes on a new file and a new language — C-x C-w is the only
+   way that happens — the others have to follow, or they would go on claiming a
+   path and a language config that is no longer anyone's.
+
+   The language belongs to the root of the family; the views hold the same
+   pointer but do not own it, which is why the cleanup at exit frees a view's
+   language config no more than once (see main()). */
+void buffer_family_sync(int bi)
+{
+  buffer_t *src;
+  int root, i;
+
+  if (bi < 0 || bi >= g_nbuf) return;
+  src = &g_buffers[bi];
+  root = src->is_view ? src->view_of : bi;
+  for (i = 0; i < g_nbuf; i++) {
+    buffer_t *b = &g_buffers[i];
+    if (i == bi || !(i == root || (b->is_view && b->view_of == root))) continue;
+    strncpy(b->path, src->path, sizeof b->path - 1); b->path[sizeof b->path - 1] = '\0';
+    b->has_file = src->has_file;
+    b->stamp    = src->stamp;
+    b->langcfg  = src->langcfg;
+    b->grammar  = src->grammar;
+    b->keywords = src->keywords;
+    b->n_keywords = src->n_keywords;
+    b->folding  = src->folding;
+    strncpy(b->langname, src->langname, sizeof b->langname - 1);
+    b->langname[sizeof b->langname - 1] = '\0';
+    gtcaca_editor_set_langcfg(b->ed, b->langcfg);
+    gtcaca_editor_set_grammar(b->ed, b->grammar);
+  }
+}
+
 /* Position a pane's buffer editor to fill its slot window. */
 /* ── split-tree node pool ──────────────────────────────────────────────────── */
 
@@ -831,6 +865,7 @@ void save_as_done(const char *input)
 
   gtcaca_editor_set_save_point(g_ed);
   ccm_stamp_buffer(g_cur_buf);  /* the buffer now visits this file, as of now */
+  buffer_family_sync(g_cur_buf);   /* other windows on this document, too */
   ccm_log_file('W', b->path);   /* b->path, not `path`: the canonical absolute form */
   snprintf(g_message, sizeof g_message, "Wrote %s", path);
 }

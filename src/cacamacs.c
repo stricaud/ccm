@@ -476,6 +476,9 @@ int main(int argc, char **argv)
 
   buffer_store_globals(g_cur_buf);
   for (i = 0; i < g_nbuf; i++) {
+    /* A view borrows its language config from the buffer it was split from
+       (see buffer_create_view): freeing it here as well would free it twice. */
+    if (g_buffers[i].is_view) continue;
     gtcaca_editor_langcfg_free(g_buffers[i].langcfg);
     gtcaca_editor_grammar_free(g_buffers[i].grammar);
   }

@@ -308,6 +308,7 @@ void browser_open_current(void);
 int buf_index_of(gtcaca_editor_widget_t *ed);
 int buffer_create(const char *path);
 int buffer_create_view(int src);   /* a second window onto the buffer `src` */
+void buffer_family_sync(int bi);   /* carry a new file/language to its other views */
 void buffer_load_globals(int bi);
 void buffer_store_globals(int bi);
 void collect_leaves(int n, int *out, int *cnt);
