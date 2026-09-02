@@ -21,6 +21,7 @@
 #include <gtcaca/custom.h>
 #include <gtcaca/box.h>
 #include <gtcaca/colordialog.h>
+#include <gtcaca/dialog.h>
 
 #include "cacamacs.h"
 #include "diagram.h"
@@ -28,7 +29,7 @@
 enum { TOOL_SELECT = 0, TOOL_SHAPE, TOOL_TEXT, TOOL_CONN, TOOL_ERASE,
        TOOL_PENCIL, TOOL_LINE };
 enum { DRAG_NONE = 0, DRAG_MOVE, DRAG_RESIZE, DRAG_CONNECT, DRAG_NEWSHAPE, DRAG_PAN,
-       DRAG_PALETTE, DRAG_ERASE, DRAG_PENCIL, DRAG_LINE, DRAG_LINE_END };
+       DRAG_PALETTE, DRAG_ERASE, DRAG_PENCIL, DRAG_LINE, DRAG_LINE_END, DRAG_BAND };
 
 /* Characters the freehand pen cycles through with Space. */
 static const char PEN_CHARS[] = "*#+.oxX@=~";
@@ -77,17 +78,37 @@ static dgm_doc_t              *g_doc;
 static dgm_grid_t              g_grid;          /* scratch render target */
 static int  g_dgm_open;
 
-static int  g_sel = -1;                         /* selected shape, -1 for none */
+static int  g_sel = -1;                         /* the primary selection, -1 for none */
+/* More than one object can be selected at once: g_multi says which, g_sel is
+   the one picked last. Commands that only make sense on a single object — edit
+   the label, flip a link's arrows, drag a handle — use g_sel; the ones that
+   generalise (move, restyle, delete, duplicate) run over the whole set. Keeping
+   a primary rather than a bare set is what lets the two live side by side:
+   the handles and the label editor always have exactly one object to point at. */
+static unsigned char g_multi[DGM_MAX_SHAPES];
+static int  g_nmulti;
+static int  g_band_add;                         /* the rubber band adds rather than replaces */
+static int  g_click_sel = -1;                   /* pressed inside a group: the one to keep if
+                                                   the press turns out to be a click, not a drag */
 static int  g_tool = TOOL_SELECT;
 static int  g_shape = DGM_RECT;                 /* which shape the shape tool draws */
 static int  g_pal = 1;                          /* the palette pane is shown         */
 static int  g_pal_sel;                          /* highlighted palette row           */
 static int  g_cur_x, g_cur_y;                   /* keyboard cursor, in canvas cells  */
 static int  g_conn_from = -1;                   /* "now pick the other end"          */
+static int  g_conn_from_side = DGM_SIDE_AUTO;   /* the handle that started the link  */
 static int  g_pen = 0;                          /* index into PEN_CHARS              */
 static int  g_new_fg = DGM_COLOR_DEFAULT;       /* style the next object gets        */
 static int  g_new_bg = DGM_COLOR_DEFAULT;
 static int  g_new_stroke = DGM_SOLID;
+/* What `q` drops in the buffer. The ASCII *is* the picture; the Mermaid is the
+   graph behind it, which a Markdown viewer draws for real. Which one a diagram
+   wants depends on where it is going, so the choice is a per-session setting:
+   it starts from "diagram-mermaid-default" in config.json and C-x q changes it
+   on the spot. */
+enum { OUT_ASCII = 0, OUT_MERMAID };
+static int  g_out;
+static int  g_cx;                               /* C-x seen, waiting for the next key */
 static int  g_prompt;                           /* the one-line "export to:" question */
 static char g_prompt_label[48];
 static char g_prompt_buf[PATH_MAX];
@@ -114,6 +135,8 @@ static undo_t g_undo[UNDO_MAX];
 static int    g_undo_n;
 
 static void dgm_status(void);
+static void sel_validate(void);   /* undo swaps the object list wholesale */
+static const char *out_name(void);
 
 /* ── undo ────────────────────────────────────────────────────────────────────
    Snapshots are of the object list only: the raw layer is set once, when a
@@ -174,7 +197,7 @@ static void undo_pop(void)
     memcpy(g_doc->s, u.s, (size_t)u.n * sizeof *u.s);
     g_doc->n = u.n;
     free(u.s);
-    if (g_sel >= g_doc->n) g_sel = -1;
+    sel_validate();
   }
   snprintf(g_dgm_msg, sizeof g_dgm_msg, u.cells ? "Undo — %d character%s back" : "Undo",
            u.ncells, u.ncells == 1 ? "" : "s");
@@ -189,6 +212,64 @@ static void undo_clear(void)
     free(g_undo[g_undo_n].cells);
   }
   g_nstroke = 0;
+}
+
+/* ── the selection ───────────────────────────────────────────────────────────*/
+
+static int sel_has(int i) { return i >= 0 && i < g_doc->n && g_multi[i]; }
+
+static void sel_clear(void)
+{
+  memset(g_multi, 0, sizeof g_multi);
+  g_nmulti = 0;
+  g_sel = -1;
+}
+
+/* The selection becomes exactly {idx}, or empty for idx < 0. */
+static void sel_set(int idx)
+{
+  sel_clear();
+  if (idx < 0 || idx >= g_doc->n) return;
+  g_multi[idx] = 1;
+  g_nmulti = 1;
+  g_sel = idx;
+}
+
+static void sel_add(int idx)
+{
+  if (idx < 0 || idx >= g_doc->n) return;
+  if (!g_multi[idx]) { g_multi[idx] = 1; g_nmulti++; }
+  g_sel = idx;
+}
+
+/* Shift-click: in if it was out, out if it was in. Dropping the primary hands
+   that role to whatever is still selected, so the handles never vanish while
+   objects remain picked. */
+static void sel_toggle(int idx)
+{
+  int i;
+  if (idx < 0 || idx >= g_doc->n) return;
+  if (!g_multi[idx]) { sel_add(idx); return; }
+  g_multi[idx] = 0;
+  g_nmulti--;
+  if (g_sel != idx) return;
+  g_sel = -1;
+  for (i = 0; i < g_doc->n; i++) if (g_multi[i]) { g_sel = i; return; }
+}
+
+/* Objects come and go underneath the selection — an undo, a delete, a reparse —
+   so anything that is no longer there is dropped before the set is used. */
+static void sel_validate(void)
+{
+  int i;
+  g_nmulti = 0;
+  for (i = 0; i < DGM_MAX_SHAPES; i++) {
+    if (i >= g_doc->n) g_multi[i] = 0;
+    if (g_multi[i]) g_nmulti++;
+  }
+  if (g_sel >= g_doc->n || (g_sel >= 0 && !g_multi[g_sel])) g_sel = -1;
+  if (g_sel < 0 && g_nmulti)
+    for (i = 0; i < g_doc->n; i++) if (g_multi[i]) { g_sel = i; break; }
 }
 
 /* ── screen ↔ canvas ─────────────────────────────────────────────────────────
@@ -319,24 +400,56 @@ static const char *const help_lines[] = {
   "            they arm the style everything you draw next will get.",
   "            Dashes and dots are drawn with characters, so the saved ASCII",
   "            keeps them. Colour cannot survive plain text —",
-  "            C-w writes a .drawio copy that keeps colours, shapes and all.",
+  "            C-w writes a copy that keeps colours, shapes and all: name it",
+  "            .drawio for app.diagrams.net, or .mmd for Mermaid.",
+  "",
+  "  ASCII or Mermaid",
+  "            The ASCII art is the picture itself — it drops into a README, a",
+  "            comment or an email and needs nothing to read it. A Mermaid",
+  "            graph is the graph behind the picture: GitHub, GitLab and most",
+  "            Markdown viewers lay it out and draw it for real, so it keeps",
+  "            colours and true shapes, but loses the hand-placed geometry,",
+  "            free-standing lines and any loose characters.",
+  "            C-x q picks which one q inserts; in a .md file the Mermaid goes",
+  "            in a ```mermaid fence. \"diagram-mermaid-default\": true in",
+  "            ~/.cacamacs/config.json makes Mermaid the one you start on.",
   "",
   "  Eraser    drag rubs out loose characters one cell at a time; a click",
   "            removes the whole object under it.  u undoes either.",
   "            x turns the selected object into plain characters first, so",
   "            the eraser can rub out any part of it.",
   "",
-  "  Mouse     drag anywhere on an object   move it",
+  "  Mouse     drag anywhere on an object   move it (or all that are selected)",
   "            drag its # bottom-right     resize it",
   "            drag an o edge handle       link it to another object",
   "            click a link or a line      select it",
   "            double-click an object      type its label, centred in it",
-  "            drag empty space           pan       wheel  scroll",
+  "            drag empty space            a band: everything it touches is",
+  "                                        selected (Shift keeps what was)",
+  "            middle/right drag           pan       wheel  scroll",
+  "",
+  "  Several at once",
+  "            Shift-click adds an object to the selection, or takes it out —",
+  "            where the terminal passes Shift-click through, that is. Many",
+  "            keep it for their own text selection, so the band and m below",
+  "            do the same job without it.",
+  "            m adds the next object      A selects everything",
+  "            Tab starts again from one   C-g clears the selection",
+  "            With several picked, moving, colouring, resizing, r, x, D and",
+  "            Del act on all of them at once.",
   "",
   "  Linking   click one object, then click the other (with Link armed) —",
   "            or drag from a selected object's  o  handle onto another —",
   "            or select one, press c, Tab to the other, press Enter.",
   "            Any two objects link, whatever their shapes.",
+  "            The handle you drag from is the side the link leaves by, and",
+  "            where you let go is the side it arrives at — so a link dragged",
+  "            out of the right-hand side stays on the right-hand side, going",
+  "            round the boxes if it has to. Clicking instead of dragging lets",
+  "            the router pick the sides for you, as it always did.",
+  "            Two objects may be joined more than once (a request and a reply",
+  "            want two arrows), as long as the two links use different sides;",
+  "            and one handle can feed as many links as you like.",
   "",
   "  Keys      Tab      select the next object      Ret   edit its label",
   "            arrows   move the selection, or the cursor when nothing is picked",
@@ -345,8 +458,10 @@ static const char *const help_lines[] = {
   "            r        change the shape            a     flip a link's arrows",
   "            Del / d  delete      D duplicate     u     undo",
   "            s        ASCII / Unicode line drawing",
-  "            q insert the diagram at the cursor and leave (C-x C-s then",
-  "              saves the file, C-/ undoes the insert)   Q leave it behind",
+  "            q insert the diagram at the cursor and leave — it asks whether",
+  "              to insert the ASCII art or a Mermaid graph first (C-x C-s",
+  "              then saves the file, C-/ undoes the insert)",
+  "              Q leaves the drawing behind   C-x q is the same question",
   "            C-g cancel   ? this help",
   "",
   "  While typing a label: Ret commits, C-o starts a second line, C-g cancels.",
@@ -473,6 +588,76 @@ static void draw_ghost(int shape, int x, int y, int w, int h)
     }
 }
 
+/* Paint one selected object over the rendered art: a box gets its border marked,
+   a line and a connector their whole run. `primary` adds the o link handles and
+   the # resize corner, which belong to a single object at a time. */
+static void draw_selected(int idx, int primary)
+{
+  const dgm_shape_t *s;
+  /* The primary is washed brighter than the rest of the group: it is the one
+     carrying the handles, so which object a drag from a handle would resize or
+     link has to be visible at a glance. */
+  uint8_t wash = primary ? CACA_CYAN : CACA_BLUE;
+  int x, y;
+
+  if (idx < 0 || idx >= g_doc->n) return;
+  s = &g_doc->s[idx];
+  if (s->kind == DGM_CONN) {
+    int px[8], py[8], n = dgm_route(g_doc, idx, px, py, 8), k;
+    for (k = 0; k + 1 < n; k++) {
+      int cx = px[k], cy = py[k];
+      int sx = (px[k + 1] > cx) - (px[k + 1] < cx), sy = (py[k + 1] > cy) - (py[k + 1] < cy);
+      for (;;) {
+        if (on_canvas(scr_x(cx), scr_y(cy)))
+          put(scr_x(cx), scr_y(cy), grid_at(cx, cy), CACA_BLACK, wash);
+        if (cx == px[k + 1] && cy == py[k + 1]) break;
+        cx += sx; cy += sy;
+      }
+    }
+    return;
+  }
+  if (s->kind == DGM_LINE) {
+    int x0, y0, x1, y1, dx, dy, ax, ay, steps, i;
+    dgm_line_ends(s, &x0, &y0, &x1, &y1);
+    dx = x1 - x0; dy = y1 - y0;
+    ax = dx < 0 ? -dx : dx; ay = dy < 0 ? -dy : dy;
+    steps = ax > ay ? ax : ay;
+    for (i = 0; i <= steps; i++) {
+      int lx = steps ? x0 + dx * i / steps : x0, ly = steps ? y0 + dy * i / steps : y0;
+      if (on_canvas(scr_x(lx), scr_y(ly)))
+        put(scr_x(lx), scr_y(ly), grid_at(lx, ly), CACA_BLACK, wash);
+    }
+    if (!primary) return;
+    if (on_canvas(scr_x(x0), scr_y(y0)))         /* the ends are the handles */
+      put(scr_x(x0), scr_y(y0), 'o', CACA_BLACK, CACA_MAGENTA);
+    if (on_canvas(scr_x(x1), scr_y(y1)))
+      put(scr_x(x1), scr_y(y1), 'o', CACA_BLACK, CACA_MAGENTA);
+    return;
+  }
+
+  for (y = s->y; y < s->y + s->h; y++)
+    for (x = s->x; x < s->x + s->w; x++) {
+      int edge = (x == s->x || x == s->x + s->w - 1 || y == s->y || y == s->y + s->h - 1);
+      if (s->kind == DGM_NODE && !edge) continue;
+      if (!on_canvas(scr_x(x), scr_y(y))) continue;
+      put(scr_x(x), scr_y(y), grid_at(x, y), CACA_BLACK, wash);
+    }
+  /* The link handles and the resize corner. Which cells those are is asked of
+     dgm_hit_part rather than worked out again here: a handle you can see but
+     not grab (or grab but not see) is worse than no handle at all, so the
+     drawing and the hit test have to be the same rule. */
+  if (primary && s->kind == DGM_NODE) {
+    for (y = s->y; y < s->y + s->h; y++)
+      for (x = s->x; x < s->x + s->w; x++) {
+        int part = dgm_hit_part(g_doc, idx, x, y);
+        if (part != DGM_HIT_BORDER && part != DGM_HIT_CORNER) continue;
+        if (!on_canvas(scr_x(x), scr_y(y))) continue;
+        put(scr_x(x), scr_y(y), part == DGM_HIT_CORNER ? '#' : 'o', CACA_BLACK,
+            part == DGM_HIT_CORNER ? CACA_YELLOW : CACA_MAGENTA);
+      }
+  }
+}
+
 static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
 {
   int x, y, vw = view_w(), vh = view_h();
@@ -493,61 +678,13 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
       put(view_x0() + x, g_dview->y + y, ch ? ch : ' ', cfg, cbg);
     }
 
-  /* The selection, repainted on top in colour: a box gets its border and its
-     resize corner marked, a connector its whole route. */
-  if (g_sel >= 0 && g_sel < g_doc->n) {
-    const dgm_shape_t *s = &g_doc->s[g_sel];
-    if (s->kind == DGM_CONN) {
-      int px[4], py[4], n = dgm_route(g_doc, g_sel, px, py, 4), k;
-      for (k = 0; k + 1 < n; k++) {
-        int cx = px[k], cy = py[k];
-        int sx = (px[k + 1] > cx) - (px[k + 1] < cx), sy = (py[k + 1] > cy) - (py[k + 1] < cy);
-        for (;;) {
-          if (on_canvas(scr_x(cx), scr_y(cy)))
-            put(scr_x(cx), scr_y(cy), grid_at(cx, cy), CACA_BLACK, CACA_CYAN);
-          if (cx == px[k + 1] && cy == py[k + 1]) break;
-          cx += sx; cy += sy;
-        }
-      }
-    } else if (s->kind == DGM_LINE) {
-      int x0, y0, x1, y1, dx, dy, ax, ay, steps, i;
-      dgm_line_ends(s, &x0, &y0, &x1, &y1);
-      dx = x1 - x0; dy = y1 - y0;
-      ax = dx < 0 ? -dx : dx; ay = dy < 0 ? -dy : dy;
-      steps = ax > ay ? ax : ay;
-      for (i = 0; i <= steps; i++) {
-        int lx = steps ? x0 + dx * i / steps : x0, ly = steps ? y0 + dy * i / steps : y0;
-        if (on_canvas(scr_x(lx), scr_y(ly)))
-          put(scr_x(lx), scr_y(ly), grid_at(lx, ly), CACA_BLACK, CACA_CYAN);
-      }
-      if (on_canvas(scr_x(x0), scr_y(y0)))       /* the ends are the handles */
-        put(scr_x(x0), scr_y(y0), 'o', CACA_BLACK, CACA_MAGENTA);
-      if (on_canvas(scr_x(x1), scr_y(y1)))
-        put(scr_x(x1), scr_y(y1), 'o', CACA_BLACK, CACA_MAGENTA);
-    } else {
-      for (y = s->y; y < s->y + s->h; y++)
-        for (x = s->x; x < s->x + s->w; x++) {
-          int edge = (x == s->x || x == s->x + s->w - 1 || y == s->y || y == s->y + s->h - 1);
-          if (s->kind == DGM_NODE && !edge) continue;
-          if (!on_canvas(scr_x(x), scr_y(y))) continue;
-          put(scr_x(x), scr_y(y), grid_at(x, y), CACA_BLACK, CACA_CYAN);
-        }
-      /* The four link handles, then the resize corner on top of one of them:
-         a selected object shows where to drag from, so linking and resizing
-         stop being things you have to be told about. */
-      if (s->kind == DGM_NODE) {
-        int hx[4], hy[4], k;
-        hx[0] = s->x + s->w / 2;  hy[0] = s->y;                 /* top    */
-        hx[1] = s->x + s->w / 2;  hy[1] = s->y + s->h - 1;      /* bottom */
-        hx[2] = s->x;             hy[2] = s->y + s->h / 2;      /* left   */
-        hx[3] = s->x + s->w - 1;  hy[3] = s->y + s->h / 2;      /* right  */
-        for (k = 0; k < 4; k++)
-          if (on_canvas(scr_x(hx[k]), scr_y(hy[k])))
-            put(scr_x(hx[k]), scr_y(hy[k]), 'o', CACA_BLACK, CACA_MAGENTA);
-        if (on_canvas(scr_x(s->x + s->w - 1), scr_y(s->y + s->h - 1)))
-          put(scr_x(s->x + s->w - 1), scr_y(s->y + s->h - 1), '#', CACA_BLACK, CACA_YELLOW);
-      }
-    }
+  /* The selection, repainted on top in colour. Every member of the set gets the
+     wash; only the primary carries the handles, so there is never any doubt
+     about which object a drag from one of them would act on. */
+  {
+    int si;
+    for (si = 0; si < g_doc->n; si++)
+      if (g_multi[si]) draw_selected(si, si == g_sel);
   }
 
   /* The keyboard cursor: where Enter would put the next shape. Only shown when
@@ -565,11 +702,27 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
         if (!edge || !on_canvas(scr_x(x), scr_y(y))) continue;
         put(scr_x(x), scr_y(y), '.', CACA_BLACK, CACA_YELLOW);
       }
+  } else if (g_drag == DRAG_BAND) {
+    int bx, by, bw, bh;
+    drag_rect(&bx, &by, &bw, &bh);
+    for (y = by; y < by + bh; y++)
+      for (x = bx; x < bx + bw; x++) {
+        int edge = (x == bx || x == bx + bw - 1 || y == by || y == by + bh - 1);
+        if (!edge || !on_canvas(scr_x(x), scr_y(y))) continue;
+        put(scr_x(x), scr_y(y), grid_at(x, y), CACA_BLACK, CACA_GREEN);
+      }
   } else if (g_drag == DRAG_PALETTE) {
-    int gw, gh;
-    dgm_shape_default(g_shape, &gw, &gh);
-    if (g_tool == TOOL_TEXT) { gw = 4; gh = 1; }
-    draw_ghost(g_shape, g_drag_x1 - gw / 2, g_drag_y1 - gh / 2, gw, gh);
+    if (g_tool == TOOL_SHAPE || g_tool == TOOL_TEXT) {
+      int gw, gh;
+      dgm_shape_default(g_shape, &gw, &gh);
+      if (g_tool == TOOL_TEXT) { gw = 4; gh = 1; }
+      draw_ghost(g_shape, g_drag_x1 - gw / 2, g_drag_y1 - gh / 2, gw, gh);
+    } else if (g_tool == TOOL_CONN) {
+      /* Dragging the arrow out: mark the object it is over, since that is the
+         end the link will start from. */
+      int over = dgm_hit(g_doc, g_drag_x1, g_drag_y1);
+      if (over >= 0) draw_selected(over, 1);
+    }
   } else if (g_drag == DRAG_LINE) {
     int ex = g_drag_x1, ey = g_drag_y1, dx, dy, ax, ay, steps, i;
     uint32_t ch;
@@ -626,6 +779,8 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
     for (x = 0; x < g_dview->width; x++) put(g_dview->x + x, ly, ' ', CACA_BLACK, CACA_LIGHTGRAY);
     if (g_prompt)
       snprintf(line, sizeof line, "%s%s_", g_prompt_label, g_prompt_buf);
+    else if (g_cx)
+      snprintf(line, sizeof line, "C-x -   (q picks ASCII or Mermaid for the insert)");
     else if (g_confirm_quit)
       snprintf(line, sizeof line,
                "Leave the drawing behind?  y = insert it after all   n = discard it   C-g = stay");
@@ -659,6 +814,10 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
       snprintf(line, sizeof line,
                "Line: drag from one end to the other — plain, no arrowheads "
                "| l links objects instead   u undoes   1 back to Select");
+    else if (g_nmulti > 1)
+      snprintf(line, sizeof line,
+               "%d selected: drag any of them to move them all · click one to pick just it · "
+               "C colour  S dashed  Del removes them  C-g clears", g_nmulti);
     else if (g_sel >= 0)
       snprintf(line, sizeof line,
                "Drag anywhere on it to move · # corner resizes · o handles link · "
@@ -666,7 +825,8 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
     else
       snprintf(line, sizeof line,
                "Pick a shape on the left (or press its digit), then click the canvas | "
-               "Tab select  C colour  S dashed  C-w .drawio  q insert  ? help");
+               "Tab/m select  C colour  C-w export  q insert %s (C-x q switches)  ? help",
+               out_name());
     put_str_clipped(g_dview->x, ly, line, g_dview->width, CACA_BLACK, CACA_LIGHTGRAY);
   }
 
@@ -713,20 +873,28 @@ static void dgm_status(void)
   const char *base = (g_cur_buf >= 0 && g_cur_buf < g_nbuf && g_buffers[g_cur_buf].has_file)
                    ? g_buffers[g_cur_buf].path : "*scratch*";
   const char *slash = strrchr(base, '/');
+  char sel[24];
   int nb = 0, nc = 0, nt = 0, nl = 0, i;
+  if (g_nmulti > 1) snprintf(sel, sizeof sel, " %d selected", g_nmulti);
+  else sel[0] = '\0';                            /* one object needs no count */
   for (i = 0; i < g_doc->n; i++) {
     if (g_doc->s[i].kind == DGM_NODE)      nb++;
     else if (g_doc->s[i].kind == DGM_CONN) nc++;
     else if (g_doc->s[i].kind == DGM_LINE) nl++;
     else nt++;
   }
+  /* The count of what is selected and the form q will insert both belong near
+     the front: this line is routinely wider than the terminal, and anything
+     appended to the end of it is simply never seen. */
   snprintf(buf, sizeof buf,
-           " %s%s  diagram  %s  %d shape%s %d link%s %d line%s %d label%s  %s  %s",
+           " %s%s  diagram  %s%s  %d shape%s %d link%s %d line%s %d label%s  %s  "
+           "q %s %s at the cursor",
            g_modified ? "**  " : "--  ", slash ? slash + 1 : base, tool_name(),
-           nb, nb == 1 ? "" : "s", nc, nc == 1 ? "" : "s",
+           sel, nb, nb == 1 ? "" : "s", nc, nc == 1 ? "" : "s",
            nl, nl == 1 ? "" : "s", nt, nt == 1 ? "" : "s",
            g_doc->style == DGM_STYLE_UNICODE ? "unicode" : "ascii",
-           g_ins_end > g_ins_start ? "q replaces the selection" : "q inserts at the cursor");
+           g_ins_end > g_ins_start ? "replaces the selection with" : "inserts",
+           out_name());
   {                                            /* what the next object will look like */
     char style[96];
     int fg = g_sel >= 0 ? g_doc->s[g_sel].fg : g_new_fg;
@@ -743,7 +911,7 @@ static void dgm_status(void)
 static void begin_edit(int idx)
 {
   if (idx < 0 || idx >= g_doc->n || g_doc->s[idx].kind == DGM_CONN) return;
-  g_sel = idx;
+  sel_set(idx);
   strncpy(g_edit_buf, g_doc->s[idx].label, sizeof g_edit_buf - 1);
   g_edit_buf[sizeof g_edit_buf - 1] = '\0';
   g_edit_len = (int)strlen(g_edit_buf);
@@ -762,9 +930,44 @@ static void commit_edit(int keep)
   /* An empty text object would be invisible and unselectable — drop it. */
   if (g_doc->s[g_sel].kind == DGM_TEXT && !g_edit_buf[0]) {
     dgm_delete(g_doc, g_sel);
-    g_sel = -1;
+    sel_clear();
   }
   g_modified = 1;
+}
+
+static const char *out_name(void) { return g_out == OUT_MERMAID ? "mermaid" : "ascii"; }
+
+/* Ask which form to insert. The configured default is the button that starts
+   highlighted, so "diagram-mermaid-default": true still decides the answer you
+   get by just pressing Enter. Returns 0 if the question was cancelled, in which
+   case nothing should be inserted and the drawing stays open. */
+static int ask_out_format(void)
+{
+  const char *mermaid_first[2] = { "mermaid", "ascii" };
+  const char *ascii_first[2]   = { "ascii", "mermaid" };
+  int def_mermaid = (g_out == OUT_MERMAID);
+  int r = gtcaca_dialog_run("Insert diagram",
+                            "Which diagram format would you like to insert?",
+                            def_mermaid ? mermaid_first : ascii_first, 2);
+  gtcaca_redraw();
+  if (r < 0) return 0;                           /* cancelled: stay where we are */
+  g_out = (r == 0) == def_mermaid ? OUT_MERMAID : OUT_ASCII;
+  return 1;
+}
+
+/* Does this buffer take a Mermaid graph as a fenced block? Markdown renderers
+   draw ```mermaid fences and show the source of anything else, so the fence is
+   the difference between a diagram and a wall of text — while in a .c file the
+   same fence would just be three stray backticks. */
+static int buffer_is_markdown(void)
+{
+  const char *path, *dot;
+  if (g_cur_buf < 0 || g_cur_buf >= g_nbuf || !g_buffers[g_cur_buf].has_file) return 0;
+  path = g_buffers[g_cur_buf].path;
+  dot = strrchr(path, '.');
+  if (!dot) return 0;
+  return !strcasecmp(dot, ".md") || !strcasecmp(dot, ".markdown") ||
+         !strcasecmp(dot, ".mdx") || !strcasecmp(dot, ".mdown");
 }
 
 /* Put the drawing into the buffer where it came from: over the region it was
@@ -781,7 +984,17 @@ static void apply_to_buffer(void)
   text = malloc(cap + 2);
   if (!art || !text) { free(art); free(text); return; }
 
-  n = dgm_to_text(g_doc, art, cap);
+  if (g_out == OUT_MERMAID) {
+    char *body = malloc(cap);
+    if (!body) { free(art); free(text); return; }
+    n = dgm_to_mermaid(g_doc, body, cap);
+    if (n >= 0)
+      n = snprintf(art, cap, "%s%s%s", buffer_is_markdown() ? "```mermaid\n" : "",
+                   body, buffer_is_markdown() ? "```\n" : "");
+    free(body);
+    if (n < 0 || (size_t)n >= cap) n = -1;
+  } else
+    n = dgm_to_text(g_doc, art, cap);
   if (n < 0) {
     free(art); free(text);
     snprintf(g_message, sizeof g_message, "Diagram too large to insert");
@@ -808,6 +1021,7 @@ static void apply_to_buffer(void)
 static void close_diagram(int keep)
 {
   int inserted = keep && g_modified;
+  int dropped  = (g_out == OUT_MERMAID) ? dgm_mermaid_dropped(g_doc) : 0;
 
   if (inserted) apply_to_buffer();
 
@@ -819,10 +1033,15 @@ static void close_diagram(int keep)
   g_show_help = 0;
   g_confirm_quit = 0;
   undo_clear();
-  snprintf(g_message, sizeof g_message,
-           inserted ? "Diagram inserted — C-x C-s saves the file, C-/ undoes the insert"
-                    : g_modified ? "Left the diagram behind (nothing inserted)"
-                                 : "Left diagram mode");
+  if (inserted && g_out == OUT_MERMAID)
+    snprintf(g_message, sizeof g_message,
+             "Mermaid graph inserted%s — C-x C-s saves the file, C-/ undoes the insert",
+             dropped ? " (free lines and loose characters do not travel — C-x q for ASCII)" : "");
+  else
+    snprintf(g_message, sizeof g_message,
+             inserted ? "Diagram inserted — C-x C-s saves the file, C-/ undoes the insert"
+                      : g_modified ? "Left the diagram behind (nothing inserted)"
+                                   : "Left diagram mode");
   pane_show_all();
 }
 
@@ -883,7 +1102,9 @@ static int erase_at(int x, int y)
                        : dgm_shape_name(g_doc->s[owner].shape);
       if (dgm_flatten(g_doc, owner, made, ERASE_MAX, &nmade) != 0) return 0;
       for (i = 0; i < nmade; i++) stroke_record(made[i].x, made[i].y, made[i].ch);
-      if (g_sel == owner) g_sel = -1;
+      /* Flattening renumbers every object after it, so the marks no longer
+         point where they did — drop the selection rather than keep a wrong one. */
+      sel_clear();
       snprintf(g_dgm_msg, sizeof g_dgm_msg,
                "That %s is plain characters now, so it can be rubbed out (u undoes)", what);
     }
@@ -897,21 +1118,46 @@ static int erase_at(int x, int y)
   return 1;
 }
 
-/* Export the objects as a .drawio file. The ASCII stays the thing that goes in
-   the document; this is the copy that keeps the colours. */
-static void export_drawio(const char *path)
+/* Write the objects out to a file of their own. The name says which kind: .mmd
+   (or .mermaid) writes the Mermaid graph, anything else the .drawio that keeps
+   the colours. Either way the buffer is untouched — that is what q is for. */
+static void export_file(const char *path)
 {
   char full[PATH_MAX], err[160];
+  const char *dot;
+
   if (!path || !path[0]) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Export cancelled"); return; }
   expand_tilde(path, full, sizeof full);
+  dot = strrchr(full, '.');
+  if (dot && (!strcasecmp(dot, ".mmd") || !strcasecmp(dot, ".mermaid"))) {
+    size_t cap = (size_t)DGM_W * DGM_H * 4 + DGM_H + 2;
+    char *body = malloc(cap);
+    FILE *f;
+    int n, dropped;
+    if (!body) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Out of memory"); return; }
+    n = dgm_to_mermaid(g_doc, body, cap);
+    if (n < 0) { free(body); snprintf(g_dgm_msg, sizeof g_dgm_msg, "Diagram too large"); return; }
+    f = fopen(full, "wb");
+    if (!f) { free(body); snprintf(g_dgm_msg, sizeof g_dgm_msg, "cannot write %s", full); return; }
+    fwrite(body, 1, (size_t)n, f);
+    dropped = dgm_mermaid_dropped(g_doc);
+    if (ferror(f) || fclose(f) != 0)
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "short write on %s", full);
+    else
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Wrote %s%s", full,
+               dropped ? " — free lines and loose characters are not in it" : "");
+    free(body);
+    return;
+  }
   if (dgm_export_drawio(g_doc, full, err, sizeof err) != 0)
     snprintf(g_dgm_msg, sizeof g_dgm_msg, "%s", err);
   else
     snprintf(g_dgm_msg, sizeof g_dgm_msg,
-             "Wrote %s — colours and all. q still inserts the ASCII here.", full);
+             "Wrote %s — colours and all. q still inserts the %s here.", full, out_name());
 }
 
-/* Offer a sensible name next to the file being edited. */
+/* Offer a sensible name next to the file being edited, in whichever form the
+   mode is set to write — so C-w and q agree about what you are making. */
 static void start_export(void)
 {
   char suggestion[PATH_MAX];
@@ -919,8 +1165,9 @@ static void start_export(void)
                    ? g_buffers[g_cur_buf].path : "diagram";
   const char *dot = strrchr(base, '.');
   int keep = dot && dot != base ? (int)(dot - base) : (int)strlen(base);
-  snprintf(suggestion, sizeof suggestion, "%.*s.drawio", keep, base);
-  snprintf(g_prompt_label, sizeof g_prompt_label, "Export to: ");
+  snprintf(suggestion, sizeof suggestion, "%.*s%s", keep, base,
+           g_out == OUT_MERMAID ? ".mmd" : ".drawio");
+  snprintf(g_prompt_label, sizeof g_prompt_label, "Export to (.mmd or .drawio): ");
   snprintf(g_prompt_buf, sizeof g_prompt_buf, "%s", suggestion);
   g_prompt_len = (int)strlen(g_prompt_buf);
   g_prompt = 1;
@@ -943,12 +1190,139 @@ static int ask_colour(const char *what, int current)
   return c < 0 ? -2 : c;
 }
 
+/* Everything the rubber band touched. A link comes along when both of its ends
+   do — that is what makes a band drawn round a cluster pick up the cluster
+   whole rather than leaving its arrows behind. The primary stays a node where
+   there is one, so the handles land somewhere useful. */
+static void select_in_rect(int bx, int by, int bw, int bh, int add)
+{
+  int i, first = -1;
+  if (!add) sel_clear();
+  for (i = 0; i < g_doc->n; i++) {
+    const dgm_shape_t *s = &g_doc->s[i];
+    if (s->kind == DGM_CONN) continue;
+    if (s->x >= bx + bw || s->x + s->w <= bx) continue;
+    if (s->y >= by + bh || s->y + s->h <= by) continue;
+    sel_add(i);
+    if (first < 0) first = i;
+  }
+  for (i = 0; i < g_doc->n; i++) {
+    const dgm_shape_t *s = &g_doc->s[i];
+    if (s->kind == DGM_CONN && sel_has(s->from) && sel_has(s->to)) sel_add(i);
+  }
+  if (first >= 0) g_sel = first;
+}
+
+/* Move everything selected by (dx, dy), clamped so the set as a whole stays on
+   the canvas — clamping each object on its own would shear the group apart. */
+static void move_selection(int dx, int dy)
+{
+  int i, minx = DGM_W, miny = DGM_H, maxx = 0, maxy = 0;
+  if (!g_nmulti) return;
+  for (i = 0; i < g_doc->n; i++) {
+    const dgm_shape_t *s = &g_doc->s[i];
+    if (!g_multi[i] || s->kind == DGM_CONN) continue;
+    if (s->x < minx) minx = s->x;
+    if (s->y < miny) miny = s->y;
+    if (s->x + s->w > maxx) maxx = s->x + s->w;
+    if (s->y + s->h > maxy) maxy = s->y + s->h;
+  }
+  if (minx > maxx) return;                       /* only links are selected */
+  if (minx + dx < 0)     dx = -minx;
+  if (miny + dy < 0)     dy = -miny;
+  if (maxx + dx > DGM_W) dx = DGM_W - maxx;
+  if (maxy + dy > DGM_H) dy = DGM_H - maxy;
+  if (!dx && !dy) return;
+  for (i = 0; i < g_doc->n; i++)
+    if (g_multi[i] && g_doc->s[i].kind != DGM_CONN) dgm_move(g_doc, i, dx, dy);
+  g_modified = 1;
+}
+
+/* Delete the whole selection in one pass.
+ *
+ * Calling dgm_delete once per marked object does not work: deleting a node
+ * takes its connectors with it, and a connector can sit at a *lower* index than
+ * the node, so even working from the back renumbers marks that have not been
+ * used yet. Compacting the list here instead means every index moves exactly
+ * once, and the map says where to. A connector also goes when either of its
+ * ends does — deleting a box must not leave an arrow pointing at nothing. */
+static void delete_selection(void)
+{
+  int map[DGM_MAX_SHAPES];
+  int i, keep = 0, removed = 0;
+
+  if (!g_nmulti) return;
+  undo_push();
+  for (i = 0; i < g_doc->n; i++) {
+    const dgm_shape_t *s = &g_doc->s[i];
+    int drop = g_multi[i];
+    if (!drop && s->kind == DGM_CONN)
+      drop = (s->from >= 0 && s->from < g_doc->n && g_multi[s->from]) ||
+             (s->to   >= 0 && s->to   < g_doc->n && g_multi[s->to]);
+    map[i] = drop ? -1 : keep++;
+    if (drop) removed++;
+  }
+  keep = 0;
+  for (i = 0; i < g_doc->n; i++) {
+    dgm_shape_t *s;
+    if (map[i] < 0) continue;
+    if (keep != i) g_doc->s[keep] = g_doc->s[i];
+    s = &g_doc->s[keep];
+    if (s->kind == DGM_CONN) {                   /* renumber the ends it still has */
+      if (s->from >= 0 && s->from < g_doc->n) s->from = map[s->from];
+      if (s->to   >= 0 && s->to   < g_doc->n) s->to   = map[s->to];
+    }
+    keep++;
+  }
+  g_doc->n = keep;
+  sel_clear();
+  if (removed) g_modified = 1;
+}
+
+/* Turn every selected shape and label into plain characters. Only nodes and
+   text are listed: a connector's characters are written out along with the node
+   it hangs off, and dgm_flatten deletes those connectors as it goes — which is
+   what shifts the indices still to come, so each one is walked back past them. */
+static int flatten_selection(void)
+{
+  int idx[DGM_MAX_SHAPES], n = 0, done = 0, i, k;
+
+  for (i = 0; i < g_doc->n; i++)
+    if (g_multi[i] && g_doc->s[i].kind != DGM_CONN) idx[n++] = i;
+  if (!n) return 0;
+  undo_push();
+  for (k = n - 1; k >= 0; k--) {                 /* back to front: only lower marks shift */
+    int gone[DGM_MAX_SHAPES], ng = 0, c, j;
+    for (c = 0; c < idx[k]; c++)                 /* its connectors that sit below it */
+      if (g_doc->s[c].kind == DGM_CONN &&
+          (g_doc->s[c].from == idx[k] || g_doc->s[c].to == idx[k])) gone[ng++] = c;
+    if (dgm_flatten(g_doc, idx[k], NULL, 0, NULL) != 0) continue;
+    done++;
+    for (j = 0; j < k; j++)
+      for (c = 0; c < ng; c++) if (idx[j] > gone[c]) idx[j]--;
+  }
+  if (done) { sel_clear(); g_modified = 1; }
+  return done;
+}
+
+static void resize_selection(int dw, int dh)
+{
+  int i;
+  if (!g_nmulti) return;
+  undo_push();
+  for (i = 0; i < g_doc->n; i++)
+    if (g_multi[i] && g_doc->s[i].kind != DGM_CONN) dgm_resize(g_doc, i, dw, dh);
+  g_modified = 1;
+}
+
 /* Restyle the selection, or arm the style for what comes next. */
 static void style_selection(int fg, int bg, int stroke)
 {
-  if (g_sel >= 0 && g_sel < g_doc->n) {
+  if (g_nmulti) {
+    int i;
     undo_push();
-    dgm_set_style(g_doc, g_sel, fg, bg, stroke);
+    for (i = 0; i < g_doc->n; i++)
+      if (g_multi[i]) dgm_set_style(g_doc, i, fg, bg, stroke);
     g_modified = 1;
   } else {
     if (fg >= 0)     g_new_fg = fg;
@@ -960,7 +1334,23 @@ static void style_selection(int fg, int bg, int stroke)
 /* Join two objects, or explain why nothing happened. Two objects are either
    linked or not — asking for a link that already exists (in either direction)
    selects it instead of stacking an invisible second one on the same route. */
-static void link_objects(int from, int to)
+static const char *side_name(int side)
+{
+  switch (side) {
+  case DGM_SIDE_TOP:    return "top";
+  case DGM_SIDE_BOTTOM: return "bottom";
+  case DGM_SIDE_LEFT:   return "left";
+  case DGM_SIDE_RIGHT:  return "right";
+  default:              return "";
+  }
+}
+
+/* Join two objects, leaving by the given sides (DGM_SIDE_AUTO lets the router
+   choose, which is what the click-then-click gesture and the keyboard use).
+   Two objects may be joined more than once — a request and a reply want to be
+   two arrows — but not twice by the same route, since the second would land
+   exactly on the first. Asking for a route that already exists selects it. */
+static void link_objects_sides(int from, int to, int from_side, int to_side)
 {
   int existing, c;
 
@@ -969,39 +1359,59 @@ static void link_objects(int from, int to)
     snprintf(g_dgm_msg, sizeof g_dgm_msg, "An object cannot link to itself");
     return;
   }
-  existing = dgm_find_conn(g_doc, from, to);
+  existing = dgm_find_conn_sides(g_doc, from, to, from_side, to_side);
   if (existing >= 0) {
-    g_sel = existing;
+    sel_set(existing);
     snprintf(g_dgm_msg, sizeof g_dgm_msg,
-             "Those two are already linked — a flips the arrows, Del removes it");
+             "That link is already there — drag from another handle for a second "
+             "route, a flips the arrows, Del removes it");
     return;
   }
   undo_push();
-  c = dgm_add_conn(g_doc, from, to);
+  c = dgm_add_conn_sides(g_doc, from, to, from_side, to_side);
   if (c < 0) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Cannot link those two"); return; }
   apply_new_style(c);
-  g_sel = c;
+  sel_set(c);
   g_modified = 1;
-  snprintf(g_dgm_msg, sizeof g_dgm_msg, "Linked");
+  if (from_side)
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "Linked from the %s side to the %s",
+             side_name(from_side), side_name(to_side));
+  else
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "Linked");
+}
+
+static void link_objects(int from, int to)
+{
+  link_objects_sides(from, to, DGM_SIDE_AUTO, DGM_SIDE_AUTO);
 }
 
 /* Cycle the selection through the objects, connectors included. */
 static void select_next(int dir)
 {
   int n = g_doc->n, i;
-  if (n == 0) { g_sel = -1; return; }
+  if (n == 0) { sel_clear(); return; }
   i = g_sel < 0 ? (dir > 0 ? -1 : 0) : g_sel;
   i = (i + dir + n) % n;
-  g_sel = i;
+  sel_set(i);
   scroll_to_sel();
 }
 
 /* ── mouse ───────────────────────────────────────────────────────────────────*/
 
-static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
-                    int mx, int my, int button, void *ud)
+static int mouse_cb_inner(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
+                          int mx, int my, int button, void *ud)
 {
   int cx, cy;
+  /* Shift extends the selection where the terminal forwards it — many keep
+     Shift-click for their own text selection, which is why the rubber band and
+     m do the same job without it. Older toolkits cannot report a modifier at
+     all (see the check in CMakeLists.txt); there it simply never fires, and
+     those other two gestures carry the feature on their own. */
+#ifdef CCM_HAVE_MOUSE_MODIFIERS
+  int shift = (gtcaca_mouse_modifiers() & GTCACA_MOD_SHIFT) != 0;
+#else
+  int shift = 0;
+#endif
   (void)w; (void)ud;
   if (!g_dgm_open) return 0;
 
@@ -1035,7 +1445,10 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       palette_pick(row);
       g_drag_x0 = g_drag_x1 = cx;
       g_drag_y0 = g_drag_y1 = cy;
-      if (g_tool == TOOL_SHAPE || g_tool == TOOL_TEXT) g_drag = DRAG_PALETTE;
+      /* The pane says "click or drag one onto the canvas", so every row has to
+         mean something when it is dragged out — dragging the Link row used to
+         arm the tool and then silently do nothing on release. */
+      g_drag = DRAG_PALETTE;
       return 1;
     }
     if (!on_canvas(mx, my)) return 1;            /* the pane edge or the hint bar */
@@ -1075,7 +1488,7 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     if (g_tool == TOOL_SHAPE) { g_drag = DRAG_NEWSHAPE; return 1; }
     if (g_tool == TOOL_TEXT) {
       undo_push();
-      g_sel = dgm_add_text(g_doc, cx, cy, "");
+      sel_set(dgm_add_text(g_doc, cx, cy, ""));
       apply_new_style(g_sel);
       g_modified = 1;
       palette_pick(0);                           /* one placement, then back to Select */
@@ -1086,17 +1499,36 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     hit = dgm_hit(g_doc, cx, cy);
     if (hit < 0) {                               /* nothing here */
       int conn = dgm_hit_conn(g_doc, cx, cy);
-      if (conn >= 0 && g_tool == TOOL_SELECT) { g_sel = conn; return 1; }
-      g_sel = -1;
-      g_drag = DRAG_PAN;
+      if (conn >= 0 && g_tool == TOOL_SELECT) {
+        if (shift) sel_toggle(conn); else sel_set(conn);
+        return 1;
+      }
+      /* Left on empty space pulls a rubber band, the way it does in draw.io;
+         the other buttons pan, which is what the left one used to do. Holding
+         Shift keeps whatever was already picked and adds to it. */
+      if (button != 1 || g_tool != TOOL_SELECT) { g_drag = DRAG_PAN; return 1; }
+      g_band_add = shift;
+      if (!shift) sel_clear();
+      g_drag = DRAG_BAND;
       return 1;
     }
 
-    g_sel = hit;
+    /* Shift-click on an object adds it to the selection (or takes it out) and
+       starts nothing — the click is the whole gesture. */
+    if (shift && g_tool == TOOL_SELECT) { sel_toggle(hit); return 1; }
+    /* Pressing on one of several already-picked objects keeps the group, so a
+       drag from here moves all of them. But a press that turns out to be a
+       plain click means "just this one" — otherwise there is no way out of a
+       group except C-g, and every drag afterwards moves everything. Which of
+       the two it was is only known on release, so record the candidate now. */
+    g_click_sel = -1;
+    if (sel_has(hit)) { g_sel = hit; if (g_nmulti > 1) g_click_sel = hit; }
+    else sel_set(hit);
     if (g_tool == TOOL_CONN) {
       /* Arm the link now: a second click finishes it, and dragging straight to
          the other object finishes it too. Either gesture works. */
       g_conn_from = hit;
+      g_conn_from_side = DGM_SIDE_AUTO;
       g_drag = DRAG_CONNECT;
       g_drag_shape = hit;
       snprintf(g_dgm_msg, sizeof g_dgm_msg, "Now click the object to link to");
@@ -1114,8 +1546,24 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       return 1;
     }
     switch (dgm_hit_part(g_doc, hit, cx, cy)) {
-    case DGM_HIT_CORNER: g_drag = DRAG_RESIZE;  g_drag_shape = hit; undo_push(); break;
-    case DGM_HIT_BORDER: g_drag = DRAG_CONNECT; g_drag_shape = hit; break;
+    case DGM_HIT_CORNER:
+      /* Resizing pins the opposite corner and stretches to the pointer, so the
+         box tracks the mouse wherever it goes — including back past the anchor,
+         which used to jam it at its minimum size and look like the drag had
+         been dropped. */
+      g_drag = DRAG_RESIZE;
+      g_drag_shape = hit;
+      g_drag_ox = g_doc->s[hit].x;
+      g_drag_oy = g_doc->s[hit].y;
+      undo_push();
+      break;
+    case DGM_HIT_BORDER:
+      /* Which handle you grab is which edge the link leaves by — drag from the
+         right-hand side and the arrow stays on the right-hand side. */
+      g_drag = DRAG_CONNECT;
+      g_drag_shape = hit;
+      g_conn_from_side = dgm_handle_side(g_doc, hit, cx, cy);
+      break;
     default:
       g_drag = DRAG_MOVE; g_drag_shape = hit; undo_push();
       g_drag_ox = cx - g_doc->s[hit].x;
@@ -1135,7 +1583,7 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       snprintf(g_dgm_msg, sizeof g_dgm_msg, "A line carries no text — put a label beside it (t)");
       return 1;
     }
-    g_sel = hit;
+    sel_set(hit);
     begin_edit(hit);
     return 1;
   }
@@ -1146,13 +1594,21 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     switch (g_drag) {
     case DRAG_MOVE: {
       dgm_shape_t *s = &g_doc->s[g_drag_shape];
-      dgm_place(g_doc, g_drag_shape, cx - g_drag_ox, cy - g_drag_oy, s->w, s->h);
-      g_modified = 1;
+      int nx = cx - g_drag_ox, ny = cy - g_drag_oy;
+      if (g_nmulti > 1 && sel_has(g_drag_shape))
+        move_selection(nx - s->x, ny - s->y);    /* drag one, they all come */
+      else {
+        dgm_place(g_doc, g_drag_shape, nx, ny, s->w, s->h);
+        g_modified = 1;
+      }
       break;
     }
     case DRAG_RESIZE: {
-      dgm_shape_t *s = &g_doc->s[g_drag_shape];
-      dgm_place(g_doc, g_drag_shape, s->x, s->y, cx - s->x + 1, cy - s->y + 1);
+      int ax = g_drag_ox, ay = g_drag_oy;        /* the corner that stays put */
+      int nx = cx < ax ? cx : ax, ny = cy < ay ? cy : ay;
+      int nw = (cx > ax ? cx - ax : ax - cx) + 1;
+      int nh = (cy > ay ? cy - ay : ay - cy) + 1;
+      dgm_place(g_doc, g_drag_shape, nx, ny, nw, nh);
       g_modified = 1;
       break;
     }
@@ -1169,6 +1625,7 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       break;
     }
     case DRAG_LINE:
+    case DRAG_BAND:
       break;                                     /* drawn as a preview until released */
     case DRAG_LINE_END:
       dgm_line_set(g_doc, g_drag_shape, g_drag_ox, g_drag_oy, cx, cy);
@@ -1200,6 +1657,20 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
   }
 
   /* release */
+  if (g_drag == DRAG_BAND) {
+    int bx, by, bw, bh;
+    g_drag_x1 = cx; g_drag_y1 = cy;
+    drag_rect(&bx, &by, &bw, &bh);
+    g_drag = DRAG_NONE;
+    select_in_rect(bx, by, bw, bh, g_band_add);
+    if (g_nmulti > 1)
+      snprintf(g_dgm_msg, sizeof g_dgm_msg,
+               "%d objects selected — drag any of them to move them all, "
+               "or click one to go back to just that one", g_nmulti);
+    else if (g_nmulti == 0 && (bw > 1 || bh > 1))
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Nothing inside the band");
+    return 1;
+  }
   if (g_drag == DRAG_PENCIL) {
     int n = g_nstroke;
     g_drag = DRAG_NONE;
@@ -1216,7 +1687,7 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     idx = dgm_add_line(g_doc, g_drag_x0, g_drag_y0, cx, cy);
     apply_new_style(idx);
     if (idx >= 0) {
-      g_sel = idx;
+      sel_set(idx);
       g_modified = 1;
       snprintf(g_dgm_msg, sizeof g_dgm_msg,
                "Line drawn — drag it to move, drag an end to re-aim, Del removes it");
@@ -1250,7 +1721,7 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
        friendly reading of "click here", and dragging still sizes it. */
     if (bw < 3 && bh < 3) { bw = dw; bh = dh; }
     undo_push();
-    g_sel = dgm_add_node(g_doc, g_shape, bx, by, bw, bh, "");
+    sel_set(dgm_add_node(g_doc, g_shape, bx, by, bw, bh, ""));
       apply_new_style(g_sel);
     g_modified = 1;
     g_drag = DRAG_NONE;
@@ -1259,22 +1730,36 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     return 1;
   }
   if (g_drag == DRAG_PALETTE) {
+    int dw, dh;
     g_drag = DRAG_NONE;
-    if (on_canvas(mx, my)) {                     /* dropped onto the canvas */
-      int dw, dh;
-      undo_push();
-      if (g_tool == TOOL_TEXT) {
-        g_sel = dgm_add_text(g_doc, cx, cy, "");
-      apply_new_style(g_sel);
-      } else {
-        dgm_shape_default(g_shape, &dw, &dh);
-        g_sel = dgm_add_node(g_doc, g_shape, cx - dw / 2, cy - dh / 2, dw, dh, "");
-      apply_new_style(g_sel);
+    if (!on_canvas(mx, my)) return 1;            /* let go back over the pane */
+    if (g_tool == TOOL_CONN) {
+      /* Dropped on an object: that is the end the link starts from, so arm it
+         and wait for the second click. Dropped on empty space it just leaves
+         the tool armed, which is what the click on the row already did. */
+      int from = dgm_hit(g_doc, cx, cy);
+      if (from >= 0) {
+        sel_set(from);
+        g_conn_from = from;
+        snprintf(g_dgm_msg, sizeof g_dgm_msg,
+                 "Link from \"%s\": now click the object to link to  (C-g cancels)",
+                 g_doc->s[from].label[0] ? g_doc->s[from].label : "that object");
       }
-      g_modified = 1;
-      palette_pick(0);
-      if (g_sel >= 0) begin_edit(g_sel);
+      return 1;
     }
+    if (g_tool != TOOL_SHAPE && g_tool != TOOL_TEXT)
+      return 1;                                  /* eraser, pen, line: drawn on the canvas */
+    undo_push();
+    if (g_tool == TOOL_TEXT) {
+      sel_set(dgm_add_text(g_doc, cx, cy, ""));
+    } else {
+      dgm_shape_default(g_shape, &dw, &dh);
+      sel_set(dgm_add_node(g_doc, g_shape, cx - dw / 2, cy - dh / 2, dw, dh, ""));
+    }
+    apply_new_style(g_sel);
+    g_modified = 1;
+    palette_pick(0);
+    if (g_sel >= 0) begin_edit(g_sel);
     return 1;
   }
   if (g_drag == DRAG_CONNECT) {
@@ -1282,8 +1767,13 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     int was_click = (cx == g_drag_x0 && cy == g_drag_y0);
     g_drag = DRAG_NONE;
     if (target >= 0 && target != g_drag_shape) {
-      link_objects(g_drag_shape, target);
+      /* Where you let go picks the arriving edge, but only when the drag named
+         a leaving edge too: a link made by clicking is still routed for you. */
+      int to_side = g_conn_from_side ? dgm_nearest_side(g_doc, target, cx, cy)
+                                     : DGM_SIDE_AUTO;
+      link_objects_sides(g_drag_shape, target, g_conn_from_side, to_side);
       g_conn_from = -1;
+      g_conn_from_side = DGM_SIDE_AUTO;
     } else if (was_click) {
       /* Not a drag but a click on the source: stay armed and wait for the
          second click, which is the easier gesture in a terminal. */
@@ -1296,6 +1786,13 @@ static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     }
     return 1;
   }
+  if (g_drag == DRAG_MOVE && g_click_sel >= 0 &&
+      cx == g_drag_x0 && cy == g_drag_y0) {       /* a click inside the group */
+    sel_set(g_click_sel);
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Just this one now — drag it to move it on its own");
+  }
+  g_click_sel = -1;
   g_drag = DRAG_NONE;
   return 1;
 }
@@ -1314,7 +1811,7 @@ static int typing_key(int key)
   case 10:
     if (g_editing) commit_edit(1);
     else { char tmp[PATH_MAX]; g_prompt = 0;
-           snprintf(tmp, sizeof tmp, "%s", g_prompt_buf); export_drawio(tmp); }
+           snprintf(tmp, sizeof tmp, "%s", g_prompt_buf); export_file(tmp); }
     return 1;
   case CACA_KEY_ESCAPE:
   case 7:                                        /* C-g */
@@ -1347,7 +1844,7 @@ static int typing_key(int key)
   return 1;                                      /* swallow everything while typing */
 }
 
-static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
+static int key_cb_inner(gtcaca_custom_widget_t *w, int key, void *ud)
 {
   (void)w; (void)ud;
   if (!g_dgm_open) return 0;
@@ -1362,10 +1859,27 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
     }
   }
 
+  if (g_cx) {                                    /* the key after C-x */
+    g_cx = 0;
+    if (key == 'q' || key == 'Q') {              /* C-x q: the same question */
+      if (ask_out_format()) close_diagram(1);
+      else g_dgm_msg[0] = '\0';
+      return 1;
+    }
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "C-x %c is undefined here — C-x q picks ASCII or Mermaid",
+             key >= 32 && key < 127 ? key : '?');
+    return 1;
+  }
+  if (key == 0x18) {                             /* C-x: a prefix in here too */
+    g_cx = 1;
+    return 1;
+  }
+
   if (g_show_help && key != '?') { g_show_help = 0; return 1; }
 
   switch (key) {
   case 'q': case 3:                              /* q / C-c: put it in the buffer */
+    if (!ask_out_format()) { g_dgm_msg[0] = '\0'; return 1; }
     close_diagram(1);
     return 1;
   case 'Q':                                      /* leave the drawing behind */
@@ -1375,13 +1889,14 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
   case CACA_KEY_ESCAPE:
   case 7:                                        /* C-g — the universal "never mind" */
     if (g_drag != DRAG_NONE) { g_drag = DRAG_NONE; return 1; }
+    if (g_nmulti > 1) { sel_clear(); snprintf(g_dgm_msg, sizeof g_dgm_msg, "Selection cleared"); return 1; }
     if (g_conn_from >= 0) {
       g_conn_from = -1;
       snprintf(g_dgm_msg, sizeof g_dgm_msg, "Link cancelled");
       return 1;
     }
     if (g_tool != TOOL_SELECT) { palette_pick(0); return 1; }
-    g_sel = -1;
+    sel_clear();
     g_dgm_msg[0] = '\0';
     return 1;
   case '?': g_show_help = !g_show_help; return 1;
@@ -1422,16 +1937,47 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
   }
 
   case CACA_KEY_TAB: select_next(1);  return 1;
-  case CACA_KEY_BACKSPACE:
-  case CACA_KEY_DELETE: case 'd':
-    if (g_sel >= 0) { undo_push(); dgm_delete(g_doc, g_sel); g_sel = -1; g_modified = 1; }
+  case 'm': {                                    /* add the next object to the set */
+    int n = g_doc->n, i;
+    if (n == 0) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "Nothing to select yet"); return 1; }
+    i = ((g_sel < 0 ? -1 : g_sel) + 1) % n;
+    sel_add(i);
+    scroll_to_sel();
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "%d object%s selected — m adds the next, Tab starts again from one", g_nmulti,
+             g_nmulti == 1 ? "" : "s");
     return 1;
+  }
+  case 'A': {                                    /* everything at once */
+    int i;
+    sel_clear();
+    for (i = 0; i < g_doc->n; i++) sel_add(i);
+    if (g_doc->n) g_sel = 0;
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, g_nmulti
+             ? "All %d objects selected — arrows move them, C colours them, Del removes them"
+             : "Nothing to select yet", g_nmulti);
+    return 1;
+  }
+  case CACA_KEY_BACKSPACE:
+  case CACA_KEY_DELETE: case 'd': {
+    int n = g_nmulti;
+    delete_selection();
+    if (n > 1) snprintf(g_dgm_msg, sizeof g_dgm_msg, "Deleted %d objects  (u puts them back)", n);
+    return 1;
+  }
   case 'D':
-    if (g_sel >= 0) {
-      int c;
+    if (g_nmulti) {
+      int i, last = -1, upto = g_doc->n;        /* copies land at the end: stop there */
       undo_push();
-      c = dgm_duplicate(g_doc, g_sel);
-      if (c >= 0) { g_sel = c; g_modified = 1; scroll_to_sel(); }
+      for (i = 0; i < upto; i++)
+        if (g_multi[i]) { int c = dgm_duplicate(g_doc, i); if (c >= 0) last = c; }
+      if (last >= 0) {                          /* select the copies, not the originals */
+        sel_clear();
+        for (i = upto; i < g_doc->n; i++) sel_add(i);
+        g_sel = upto;
+        g_modified = 1;
+        scroll_to_sel();
+      }
     }
     return 1;
   case CACA_KEY_RETURN: case 10:
@@ -1445,10 +1991,10 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
       int dw, dh;                                /* place the armed shape at the cursor */
       undo_push();
       if (g_tool == TOOL_TEXT) {
-        g_sel = dgm_add_text(g_doc, g_cur_x, g_cur_y, "");
+        sel_set(dgm_add_text(g_doc, g_cur_x, g_cur_y, ""));
       } else {
         dgm_shape_default(g_shape, &dw, &dh);
-        g_sel = dgm_add_node(g_doc, g_shape, g_cur_x, g_cur_y, dw, dh, "");
+        sel_set(dgm_add_node(g_doc, g_shape, g_cur_x, g_cur_y, dw, dh, ""));
       }
       apply_new_style(g_sel);
       g_modified = 1;
@@ -1462,7 +2008,7 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
     int dw, dh;
     undo_push();
     dgm_shape_default(g_shape, &dw, &dh);
-    g_sel = dgm_add_node(g_doc, g_shape, g_cur_x, g_cur_y, dw, dh, "");
+    sel_set(dgm_add_node(g_doc, g_shape, g_cur_x, g_cur_y, dw, dh, ""));
       apply_new_style(g_sel);
     g_modified = 1;
     if (g_sel >= 0) begin_edit(g_sel);
@@ -1499,12 +2045,14 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
     if (g_sel >= 0 && g_doc->s[g_sel].kind != DGM_CONN) {
       const char *what = g_doc->s[g_sel].kind == DGM_TEXT ? "label"
                        : dgm_shape_name(g_doc->s[g_sel].shape);
-      undo_push();
-      if (dgm_flatten(g_doc, g_sel, NULL, 0, NULL) == 0) {
-        g_sel = -1;
-        g_modified = 1;
-        snprintf(g_dgm_msg, sizeof g_dgm_msg,
-                 "That %s is plain characters now — the eraser can rub bits out (u undoes)", what);
+      int n = flatten_selection();
+      if (n) {
+        if (n > 1)
+          snprintf(g_dgm_msg, sizeof g_dgm_msg,
+                   "%d objects are plain characters now — the eraser can rub bits out (u undoes)", n);
+        else
+          snprintf(g_dgm_msg, sizeof g_dgm_msg,
+                   "That %s is plain characters now — the eraser can rub bits out (u undoes)", what);
       }
     } else snprintf(g_dgm_msg, sizeof g_dgm_msg,
                     "Select a shape or label first: x turns it into plain characters");
@@ -1524,11 +2072,16 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
     return 1;
   case 'r':                                      /* redraw the selection as another shape */
     if (g_sel >= 0 && g_doc->s[g_sel].kind == DGM_NODE) {
-      int next = (g_doc->s[g_sel].shape + 1) % DGM_NSHAPES;
+      /* The primary picks the next shape and the rest of the set follows it, so
+         a group of mixed shapes ends up as one shape rather than each drifting
+         a step along on its own. */
+      int next = (g_doc->s[g_sel].shape + 1) % DGM_NSHAPES, i;
       undo_push();
-      dgm_set_shape(g_doc, g_sel, next);
+      for (i = 0; i < g_doc->n; i++)
+        if (g_multi[i] && g_doc->s[i].kind == DGM_NODE) dgm_set_shape(g_doc, i, next);
       g_modified = 1;
-      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Now a %s", dgm_shape_name(next));
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, g_nmulti > 1 ? "All now %ss" : "Now a %s",
+               dgm_shape_name(next));
     } else snprintf(g_dgm_msg, sizeof g_dgm_msg, "Select an object first, then r changes its shape");
     return 1;
   case 's':
@@ -1538,7 +2091,7 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
              g_doc->style == DGM_STYLE_UNICODE ? "Unicode" : "ASCII");
     return 1;
 
-  case 0x17:                                     /* C-w: keep a .drawio copy */
+  case 0x17:                                     /* C-w: a copy in a file of its own */
     start_export();
     return 1;
   case KEY_CTRL_S:                               /* the buffer is saved the usual way */
@@ -1546,26 +2099,17 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
              "q puts the diagram in the buffer — then C-x C-s saves the file as usual");
     return 1;
 
-  case '<': case ',':
-    if (g_sel >= 0) { undo_push(); dgm_resize(g_doc, g_sel, -1, 0); g_modified = 1; }
-    return 1;
-  case '>': case '.':
-    if (g_sel >= 0) { undo_push(); dgm_resize(g_doc, g_sel, 1, 0); g_modified = 1; }
-    return 1;
-  case '[':
-    if (g_sel >= 0) { undo_push(); dgm_resize(g_doc, g_sel, 0, -1); g_modified = 1; }
-    return 1;
-  case ']':
-    if (g_sel >= 0) { undo_push(); dgm_resize(g_doc, g_sel, 0, 1); g_modified = 1; }
-    return 1;
+  case '<': case ',': resize_selection(-1, 0); return 1;
+  case '>': case '.': resize_selection(1, 0);  return 1;
+  case '[':           resize_selection(0, -1); return 1;
+  case ']':           resize_selection(0, 1);  return 1;
 
   case CACA_KEY_LEFT: case CACA_KEY_RIGHT: case CACA_KEY_UP: case CACA_KEY_DOWN: {
     int dx = (key == CACA_KEY_RIGHT) - (key == CACA_KEY_LEFT);
     int dy = (key == CACA_KEY_DOWN)  - (key == CACA_KEY_UP);
-    if (g_sel >= 0 && g_doc->s[g_sel].kind != DGM_CONN) {
+    if (g_nmulti) {
       undo_push();
-      dgm_move(g_doc, g_sel, dx, dy);
-      g_modified = 1;
+      move_selection(dx, dy);
       scroll_to_sel();
     } else {                                     /* drive the keyboard cursor instead */
       g_cur_x += dx; g_cur_y += dy;
@@ -1582,6 +2126,26 @@ static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
     break;
   }
   return 1;                                      /* the canvas owns every key */
+}
+
+/* The modeline is a widget of its own, and gtcaca paints it before the canvas —
+   so text set from inside the canvas's draw callback only reaches the screen on
+   the *following* frame, leaving the counts (and "3 selected") a keystroke
+   behind whatever you just did. Setting it here, as the event is handled and
+   before anything is painted, is what keeps it telling the truth. */
+static int key_cb(gtcaca_custom_widget_t *w, int key, void *ud)
+{
+  int r = key_cb_inner(w, key, ud);
+  if (g_dgm_open) dgm_status();
+  return r;
+}
+
+static int mouse_cb(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
+                    int mx, int my, int button, void *ud)
+{
+  int r = mouse_cb_inner(w, ev, mx, my, button, ud);
+  if (g_dgm_open) dgm_status();
+  return r;
 }
 
 /* ── entry point ─────────────────────────────────────────────────────────────*/
@@ -1724,7 +2288,7 @@ void run_diagram(void)
   if (g_doc->n == 0 && !g_doc->has_raw)
     g_doc->style = locale_is_utf8() ? DGM_STYLE_UNICODE : DGM_STYLE_ASCII;
 
-  g_sel = -1;
+  sel_clear();
   g_tool = TOOL_SELECT;
   g_pal_sel = 0;
   g_shape = DGM_RECT;
@@ -1733,6 +2297,8 @@ void run_diagram(void)
   g_vx = g_vy = 0;
   g_drag = DRAG_NONE;
   g_editing = g_prompt = g_confirm_quit = g_show_help = 0;
+  g_cx = 0;
+  g_out = g_cfg_dgm_mermaid ? OUT_MERMAID : OUT_ASCII;
   g_modified = 0;
   undo_clear();
   if (g_doc->n)

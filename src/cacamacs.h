@@ -133,6 +133,8 @@ extern int                        g_folding;
 extern int             g_cfg_tab, g_cfg_spaces, g_cfg_indent;
 extern int             g_cfg_edge;
 extern int             g_cfg_logfiles;   /* "logFiles": append to files.log */
+extern int             g_cfg_dgm_mermaid; /* "diagram-mermaid-default": diagram mode
+                                             starts set to write Mermaid rather than ASCII */
 void ccm_log_file(char op, const char *path);   /* op: 'O' opened, 'W' wrote */
 int  ccm_run_diag(const char *argv0);           /* --diag: report + probe the terminal */
 extern lang_override_t g_overrides[32];

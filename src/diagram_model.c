@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
 
@@ -236,7 +237,20 @@ int dgm_find_conn(const dgm_doc_t *d, int a, int b)
   return -1;
 }
 
-int dgm_add_conn(dgm_doc_t *d, int from, int to)
+int dgm_find_conn_sides(const dgm_doc_t *d, int a, int b, int fs, int ts)
+{
+  int i;
+  if (a < 0 || b < 0) return -1;
+  for (i = 0; i < d->n; i++) {
+    const dgm_shape_t *s = &d->s[i];
+    if (s->kind != DGM_CONN) continue;
+    if (s->from == a && s->to == b && s->from_side == fs && s->to_side == ts) return i;
+    if (s->from == b && s->to == a && s->from_side == ts && s->to_side == fs) return i;
+  }
+  return -1;
+}
+
+int dgm_add_conn_sides(dgm_doc_t *d, int from, int to, int from_side, int to_side)
 {
   dgm_shape_t *s;
   int existing;
@@ -245,15 +259,22 @@ int dgm_add_conn(dgm_doc_t *d, int from, int to)
   /* Anything with a rectangle can be an endpoint: every node shape, and a free
      text label too. Only a connector cannot end on a connector. */
   if (d->s[from].kind == DGM_CONN || d->s[to].kind == DGM_CONN) return -1;
-  /* One link per pair, in either direction: a second one would take the same
-     route, so it would be invisible on screen but real in the document. */
-  existing = dgm_find_conn(d, from, to);
+  /* A pair may be joined more than once, but not twice by the same route: that
+     second copy would be invisible on screen and real in the document, which is
+     the one outcome worth refusing. Sides are what make the routes differ. */
+  existing = dgm_find_conn_sides(d, from, to, from_side, to_side);
   if (existing >= 0) return existing;
   s = &d->s[d->n];
   memset(s, 0, sizeof *s);
   s->kind = DGM_CONN; s->from = from; s->to = to; s->arrow_to = 1;
+  s->from_side = from_side; s->to_side = to_side;
   s->fg = s->bg = DGM_COLOR_DEFAULT;
   return d->n++;
+}
+
+int dgm_add_conn(dgm_doc_t *d, int from, int to)
+{
+  return dgm_add_conn_sides(d, from, to, DGM_SIDE_AUTO, DGM_SIDE_AUTO);
 }
 
 int dgm_duplicate(dgm_doc_t *d, int idx)
@@ -463,10 +484,10 @@ int dgm_hit(const dgm_doc_t *d, int x, int y)
 
 int dgm_hit_conn(const dgm_doc_t *d, int x, int y)
 {
-  int i, px[4], py[4], n, k;
+  int i, px[8], py[8], n, k;
   for (i = d->n - 1; i >= 0; i--) {
     if (d->s[i].kind != DGM_CONN) continue;
-    n = dgm_route(d, i, px, py, 4);
+    n = dgm_route(d, i, px, py, 8);
     for (k = 0; k + 1 < n; k++) {
       int lo, hi;
       if (py[k] == py[k + 1] && y == py[k]) {
@@ -498,12 +519,28 @@ int dgm_hit_part(const dgm_doc_t *d, int idx, int x, int y)
     return DGM_HIT_INSIDE;
   }
   if (s->kind != DGM_NODE) return DGM_HIT_INSIDE;
-  if (x == s->x + s->w - 1 && y == s->y + s->h - 1) return DGM_HIT_CORNER;
-  /* Only the four handles start a link; the rest of the border moves the
-     object, which is what dragging an edge looks like it should do. */
-  on_edge = (x == s->x + s->w / 2 && (y == s->y || y == s->y + s->h - 1)) ||
-            (y == s->y + s->h / 2 && (x == s->x || x == s->x + s->w - 1));
-  return on_edge ? DGM_HIT_BORDER : DGM_HIT_INSIDE;
+  /* One cell per handle is a hard target with a mouse in a terminal: a press a
+     single cell out of the corner moves the object instead of resizing it, and
+     the middle of a 14-wide edge is one column in fourteen. So each grab zone is
+     widened wherever the shape is big enough for that to happen without one
+     handle swallowing another — the corner is tested first, and only reaches
+     back along the bottom row, where the bottom handle never is. */
+  {
+    int right = s->x + s->w - 1, bottom = s->y + s->h - 1;
+    int mx = s->x + s->w / 2, my = s->y + s->h / 2;
+    int corner_w = s->w >= 6 ? 2 : 1;      /* cells of the bottom row that resize */
+    int span_x   = s->w >= 8 ? 1 : 0;      /* columns either side of a top/bottom handle */
+    int span_y   = s->h >= 5 ? 1 : 0;      /* rows either side of a left/right handle */
+    int dx = x - mx, dy = y - my;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    if (y == bottom && x > right - corner_w) return DGM_HIT_CORNER;
+    /* Only the handles start a link; the rest of the border moves the object,
+       which is what dragging an edge looks like it should do. */
+    on_edge = ((y == s->y || y == bottom) && dx <= span_x) ||
+              ((x == s->x || x == right)  && dy <= span_y);
+    return on_edge ? DGM_HIT_BORDER : DGM_HIT_INSIDE;
+  }
 }
 
 void dgm_extent(const dgm_doc_t *d, int *w, int *h)
@@ -884,10 +921,106 @@ static void draw_text(dgm_grid_t *g, const dgm_shape_t *s)
   }
 }
 
+/* The cell just outside `s` on `side` — where a link attached there begins. */
+static void side_exit(const dgm_shape_t *s, int side, int *x, int *y)
+{
+  switch (side) {
+  case DGM_SIDE_TOP:    *x = s->x + s->w / 2; *y = s->y - 1;      break;
+  case DGM_SIDE_BOTTOM: *x = s->x + s->w / 2; *y = s->y + s->h;   break;
+  case DGM_SIDE_LEFT:   *x = s->x - 1;        *y = s->y + s->h / 2; break;
+  default:              *x = s->x + s->w;     *y = s->y + s->h / 2; break;  /* RIGHT */
+  }
+}
+
+/* Which sides the router picks when it is left to itself: whichever axis the
+   two boxes are further apart on, facing each other across the gap. This is
+   what every link did before sides could be named, and what a link still does
+   when it was not started from a handle. */
+static void auto_sides(const dgm_shape_t *a, const dgm_shape_t *b, int *fs, int *ts)
+{
+  int gapx = -1, gapy = -1, horizontal;
+  if (b->x > a->x + a->w - 1)      gapx = b->x - (a->x + a->w);
+  else if (a->x > b->x + b->w - 1) gapx = a->x - (b->x + b->w);
+  if (b->y > a->y + a->h - 1)      gapy = b->y - (a->y + a->h);
+  else if (a->y > b->y + b->h - 1) gapy = a->y - (b->y + b->h);
+  horizontal = (gapx >= 0 && (gapy < 0 || gapx >= gapy)) || (gapx < 0 && gapy < 0);
+  if (horizontal) {
+    int left_to_right = b->x >= a->x;
+    *fs = left_to_right ? DGM_SIDE_RIGHT : DGM_SIDE_LEFT;
+    *ts = left_to_right ? DGM_SIDE_LEFT  : DGM_SIDE_RIGHT;
+  } else {
+    int top_to_bottom = b->y >= a->y;
+    *fs = top_to_bottom ? DGM_SIDE_BOTTOM : DGM_SIDE_TOP;
+    *ts = top_to_bottom ? DGM_SIDE_TOP    : DGM_SIDE_BOTTOM;
+  }
+}
+
+/* The edge of `s` whose exit cell is closest to (x, y). Used for the end you
+   drop a link on, so letting go near the left of a box arrives on its left. */
+static int nearest_side_to(const dgm_shape_t *s, int x, int y)
+{
+  static const int sides[4] = { DGM_SIDE_TOP, DGM_SIDE_BOTTOM, DGM_SIDE_LEFT, DGM_SIDE_RIGHT };
+  int best = DGM_SIDE_TOP, bd = -1, i;
+  for (i = 0; i < 4; i++) {
+    int ex, ey, dx, dy, dist;
+    side_exit(s, sides[i], &ex, &ey);
+    dx = ex - x; dy = ey - y;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    dist = dx + 2 * dy;            /* a cell is about twice as tall as it is wide */
+    if (bd < 0 || dist < bd) { bd = dist; best = sides[i]; }
+  }
+  return best;
+}
+
+int dgm_nearest_side(const dgm_doc_t *d, int idx, int x, int y)
+{
+  if (idx < 0 || idx >= d->n || d->s[idx].kind == DGM_CONN) return DGM_SIDE_AUTO;
+  return nearest_side_to(&d->s[idx], x, y);
+}
+
+int dgm_handle_side(const dgm_doc_t *d, int idx, int x, int y)
+{
+  const dgm_shape_t *s;
+  if (dgm_hit_part(d, idx, x, y) != DGM_HIT_BORDER) return DGM_SIDE_AUTO;
+  s = &d->s[idx];
+  if (y == s->y)             return DGM_SIDE_TOP;
+  if (y == s->y + s->h - 1)  return DGM_SIDE_BOTTOM;
+  if (x == s->x)             return DGM_SIDE_LEFT;
+  return DGM_SIDE_RIGHT;
+}
+
+/* Does the straight run (x0,y0)-(x1,y1) cut through this object's rectangle?
+   Routes have to leave the boxes alone, or a link drawn out of one side comes
+   back through the middle of the other. */
+static int seg_hits_box(int x0, int y0, int x1, int y1, const dgm_shape_t *s)
+{
+  int lox = x0 < x1 ? x0 : x1, hix = x0 > x1 ? x0 : x1;
+  int loy = y0 < y1 ? y0 : y1, hiy = y0 > y1 ? y0 : y1;
+  return !(hix < s->x || lox > s->x + s->w - 1 ||
+           hiy < s->y || loy > s->y + s->h - 1);
+}
+
+/* Both exits sit one cell outside their box, so a route that is going to look
+   right never enters either rectangle at any point. */
+static int path_is_clear(const int *px, const int *py, int n,
+                         const dgm_shape_t *a, const dgm_shape_t *b)
+{
+  int i;
+  for (i = 0; i + 1 < n; i++)
+    if (seg_hits_box(px[i], py[i], px[i+1], py[i+1], a) ||
+        seg_hits_box(px[i], py[i], px[i+1], py[i+1], b)) return 0;
+  return 1;
+}
+
+static int side_dir_x(int side) { return side == DGM_SIDE_RIGHT ? 1 : side == DGM_SIDE_LEFT ? -1 : 0; }
+static int side_dir_y(int side) { return side == DGM_SIDE_BOTTOM ? 1 : side == DGM_SIDE_TOP ? -1 : 0; }
+
 int dgm_route(const dgm_doc_t *d, int conn, int *px, int *py, int max)
 {
   const dgm_shape_t *c, *a, *b;
-  int ax, ay, bx, by, gapx = -1, gapy = -1, n = 0, horizontal;
+  int fs, ts, afs, ats, ax, ay, bx, by, n = 0, i;
+  int adx, ady, bdx, bdy, a1x, a1y, b1x, b1y;
 
   if (conn < 0 || conn >= d->n || max < 2) return 0;
   c = &d->s[conn];
@@ -895,37 +1028,107 @@ int dgm_route(const dgm_doc_t *d, int conn, int *px, int *py, int max)
   if (c->from < 0 || c->to < 0 || c->from >= d->n || c->to >= d->n) return 0;
   a = &d->s[c->from]; b = &d->s[c->to];
 
-  if (b->x > a->x + a->w - 1)      gapx = b->x - (a->x + a->w);
-  else if (a->x > b->x + b->w - 1) gapx = a->x - (b->x + b->w);
-  if (b->y > a->y + a->h - 1)      gapy = b->y - (a->y + a->h);
-  else if (a->y > b->y + b->h - 1) gapy = a->y - (b->y + b->h);
+  /* Each end uses the side it was given; ends left on AUTO fall back to what
+     the router would have chosen anyway. Naming only one end is allowed — the
+     other is then aimed at it. */
+  auto_sides(a, b, &afs, &ats);
+  fs = c->from_side ? c->from_side : afs;
+  ts = c->to_side   ? c->to_side   : ats;
+  side_exit(a, fs, &ax, &ay);
+  side_exit(b, ts, &bx, &by);
+  if (!c->to_side && c->from_side)
+    { ts = nearest_side_to(b, ax, ay); side_exit(b, ts, &bx, &by); }
+  else if (!c->from_side && c->to_side)
+    { fs = nearest_side_to(a, bx, by); side_exit(a, fs, &ax, &ay); }
 
-  horizontal = (gapx >= 0 && (gapy < 0 || gapx >= gapy)) || (gapx < 0 && gapy < 0);
+  /* One cell clear of each box, in the direction its side faces: every route
+     starts and ends by stepping straight out, which is what makes the link
+     visibly leave the edge it was drawn from. */
+  adx = side_dir_x(fs); ady = side_dir_y(fs);
+  bdx = side_dir_x(ts); bdy = side_dir_y(ts);
+  a1x = ax + adx; a1y = ay + ady;
+  b1x = bx + bdx; b1y = by + bdy;
 
-  if (horizontal) {
-    int left_to_right = b->x >= a->x;
-    ay = a->y + a->h / 2; by = b->y + b->h / 2;
-    ax = left_to_right ? a->x + a->w : a->x - 1;
-    bx = left_to_right ? b->x - 1     : b->x + b->w;
-    px[n] = ax; py[n] = ay; n++;
-    if (ay != by && n + 2 < max) {
-      int mx = (ax + bx) / 2;
-      px[n] = mx; py[n] = ay; n++;
-      px[n] = mx; py[n] = by; n++;
+  /* The direct elbow first — two segments between the doorsteps. It is the
+     tidiest route when it does not run over either box. */
+  {
+    int try_x[8], try_y[8], tn = 0, order, ok = 0;
+    for (order = 0; order < 2 && !ok; order++) {
+      tn = 0;
+      try_x[tn] = ax;  try_y[tn] = ay;  tn++;      /* on a's doorstep      */
+      try_x[tn] = a1x; try_y[tn] = a1y; tn++;      /* one step clear of it */
+      /* the turn: across then down, or down then across. Both legs are
+         axis-aligned, which every segment of a route has to be — the renderer
+         walks a segment cell by cell to its end, and a diagonal never arrives. */
+      if (order == 0) { try_x[tn] = b1x; try_y[tn] = a1y; tn++; }
+      else            { try_x[tn] = a1x; try_y[tn] = b1y; tn++; }
+      try_x[tn] = b1x; try_y[tn] = b1y; tn++;      /* b's doorstep */
+      try_x[tn] = bx;  try_y[tn] = by;  tn++;
+      if (path_is_clear(try_x, try_y, tn, a, b)) ok = 1;
     }
-    px[n] = bx; py[n] = by; n++;
-  } else {
-    int top_to_bottom = b->y >= a->y;
-    ax = a->x + a->w / 2; bx = b->x + b->w / 2;
-    ay = top_to_bottom ? a->y + a->h : a->y - 1;
-    by = top_to_bottom ? b->y - 1     : b->y + b->h;
-    px[n] = ax; py[n] = ay; n++;
-    if (ax != bx && n + 2 < max) {
-      int my = (ay + by) / 2;
-      px[n] = ax; py[n] = my; n++;
-      px[n] = bx; py[n] = my; n++;
+    if (ok) {
+      for (i = 0; i < tn && i < max; i++) { px[i] = try_x[i]; py[i] = try_y[i]; }
+      n = tn < max ? tn : max;
+      goto done;
     }
+  }
+
+  /* Otherwise go round: out of each box, along a channel clear of them both,
+     and back in. This is the route for "leave on the right, arrive on the
+     left" — it has to get past both boxes to do it. */
+  if (max >= 6) {
+    int lox = (a->x < b->x ? a->x : b->x) - 2;
+    int hix = (a->x + a->w > b->x + b->w ? a->x + a->w : b->x + b->w) + 1;
+    int loy = (a->y < b->y ? a->y : b->y) - 2;
+    int hiy = (a->y + a->h > b->y + b->h ? a->y + a->h : b->y + b->h) + 1;
+    int horiz = (adx != 0);
+    if (lox < 0) lox = 0;
+    if (loy < 0) loy = 0;
+    n = 0;
+    px[n] = ax;  py[n] = ay;  n++;
+    px[n] = a1x; py[n] = a1y; n++;
+    if (horiz) {                        /* out sideways: cross on a spare row */
+      int chan = (ady == 0 && bdy == 0)
+               ? ((a1y + b1y) / 2 > (a->y + b->y) / 2 ? hiy : loy) : hiy;
+      if (b1y > hiy || a1y > hiy) chan = hiy;
+      px[n] = a1x; py[n] = chan; n++;
+      px[n] = b1x; py[n] = chan; n++;
+    } else {                            /* out vertically: use a spare column */
+      int chan = (a1x + b1x) / 2 > (a->x + b->x) / 2 ? hix : lox;
+      px[n] = chan; py[n] = a1y; n++;
+      px[n] = chan; py[n] = b1y; n++;
+    }
+    px[n] = b1x; py[n] = b1y; n++;
+    if (n < max) { px[n] = bx; py[n] = by; n++; }
+  } else {                              /* no room for a detour: straight at it */
+    n = 0;
+    px[n] = ax; py[n] = ay; n++;
     px[n] = bx; py[n] = by; n++;
+  }
+
+done:
+  for (i = 1; i < n; ) {                /* drop any point the route repeats */
+    if (px[i] == px[i - 1] && py[i] == py[i - 1]) {
+      int k;
+      for (k = i; k + 1 < n; k++) { px[k] = px[k + 1]; py[k] = py[k + 1]; }
+      n--;
+    } else i++;
+  }
+  /* And any point the route merely passes through in a straight line. The
+     renderer puts an elbow glyph at every interior point, so a redundant one
+     leaves a `+` sitting in the middle of a straight run — which not only looks
+     wrong but breaks the line in two for the recogniser that reads the art
+     back, costing the link its identity on reload. */
+  for (i = 1; i + 1 < n; ) {
+    int s1x = (px[i] > px[i-1]) - (px[i] < px[i-1]);
+    int s1y = (py[i] > py[i-1]) - (py[i] < py[i-1]);
+    int s2x = (px[i+1] > px[i]) - (px[i+1] < px[i]);
+    int s2y = (py[i+1] > py[i]) - (py[i+1] < py[i]);
+    if (s1x == s2x && s1y == s2y) {
+      int k;
+      for (k = i; k + 1 < n; k++) { px[k] = px[k + 1]; py[k] = py[k + 1]; }
+      n--;
+    } else i++;
   }
   return n;
 }
@@ -940,21 +1143,22 @@ static uint32_t arrow_glyph(int dx, int dy)
 
 static void draw_conn(const dgm_doc_t *d, dgm_grid_t *g, int conn)
 {
-  int px[4], py[4], n, i, k;
+  int px[8], py[8], n, i, k;
   glyphs_t gl = style_glyphs(d->style, 0);
   const dgm_shape_t *c = &d->s[conn];
 
-  n = dgm_route(d, conn, px, py, 4);
+  n = dgm_route(d, conn, px, py, 8);
   if (n < 2) return;
 
   pen_from(c);
   for (i = 0, k = 0; i + 1 < n; i++) {                   /* the straight runs */
     int x = px[i], y = py[i], tx = px[i + 1], ty = py[i + 1];
     int sx = (tx > x) - (tx < x), sy = (ty > y) - (ty < y);
+    int guard = DGM_W + DGM_H + 2;   /* a segment can never be longer than this */
     uint32_t ch;
     for (;;) {
       if (stroke_cell(c->stroke, k++, sx ? gl.hz : gl.vt, &ch)) gput(g, x, y, ch);
-      if (x == tx && y == ty) break;
+      if ((x == tx && y == ty) || --guard <= 0) break;
       x += sx; y += sy;
     }
   }
@@ -1441,10 +1645,11 @@ static int detect_node(const pgrid_t *p, int x, int y, int *shape, int *ox, int 
 typedef struct {
   int  boxes[16], nboxes;
   int  arrow_at[16];        /* parallel to boxes: an arrowhead points into it */
+  int  side_at[16];         /* and which edge of it the run arrived on        */
   int *stack, nstack;
 } comp_t;
 
-static void comp_note_box(comp_t *cm, int box, int arrow)
+static void comp_note_box(comp_t *cm, int box, int arrow, int side)
 {
   int i;
   for (i = 0; i < cm->nboxes; i++)
@@ -1452,6 +1657,7 @@ static void comp_note_box(comp_t *cm, int box, int arrow)
   if (cm->nboxes >= 16) return;
   cm->boxes[cm->nboxes] = box;
   cm->arrow_at[cm->nboxes] = arrow;
+  cm->side_at[cm->nboxes] = side;
   cm->nboxes++;
 }
 
@@ -1470,7 +1676,16 @@ static void flood_component(pgrid_t *p, int sx, int sy, comp_t *cm, int *cells, 
       int nx = x + dx[k], ny = y + dy[k], owner;
       if (nx < 0 || ny < 0 || nx >= p->w || ny >= p->h) continue;
       owner = powner(p, nx, ny);
-      if (owner >= 0) { comp_note_box(cm, owner, arrow); continue; }
+      if (owner >= 0) {
+        /* Which way we stepped into the box is which of its edges the line
+           met: that is the side the link has to come back attached to, or a
+           diagram saved with a link out of one side reopens with it somewhere
+           else and the picture changes under you. */
+        int side = dx[k] > 0 ? DGM_SIDE_LEFT : dx[k] < 0 ? DGM_SIDE_RIGHT
+                 : dy[k] > 0 ? DGM_SIDE_TOP  : DGM_SIDE_BOTTOM;
+        comp_note_box(cm, owner, arrow, side);
+        continue;
+      }
       if (p->used[ny * p->w + nx]) continue;
       if (!is_line_ch(pget(p, nx, ny))) continue;
       p->used[ny * p->w + nx] = 1;
@@ -1549,6 +1764,18 @@ int dgm_parse_text(dgm_doc_t *d, const char *text)
         end = c;
       }
       if (!wordy) continue;
+      /* An arrowhead on its own is the end of a link, not a label. 'v' and 'V'
+         are the only ones a letter test cannot tell apart from text, so a
+         lone one standing directly under or over a line belongs to that line —
+         and claiming it here would cut the link off from the box it points at,
+         which is how a saved diagram used to come back with its downward links
+         demoted to loose lines. */
+      if (end == x && is_arrow_ch(pget(&p, x, y)) &&
+          ((y > 0        && is_line_ch(pget(&p, x, y - 1))) ||
+           (y + 1 < p.h  && is_line_ch(pget(&p, x, y + 1))) ||
+           (x > 0        && is_line_ch(pget(&p, x - 1, y))) ||
+           (x + 1 < p.w  && is_line_ch(pget(&p, x + 1, y)))))
+        continue;
       for (c = x; c <= end; c++) str_append(run, sizeof run, &len, pget(&p, c, y));
       trim_trailing(run);
       if (run[0] && dgm_add_text(d, x, y, run) >= 0) found++;
@@ -1569,7 +1796,8 @@ int dgm_parse_text(dgm_doc_t *d, const char *text)
         continue;
       }
       for (k = 1; k < cm.nboxes; k++) {
-        int ci = dgm_add_conn(d, cm.boxes[0], cm.boxes[k]);
+        int ci = dgm_add_conn_sides(d, cm.boxes[0], cm.boxes[k],
+                                    cm.side_at[0], cm.side_at[k]);
         if (ci < 0) continue;
         d->s[ci].arrow_to   = cm.arrow_at[k];
         d->s[ci].arrow_from = cm.arrow_at[0];
@@ -1750,4 +1978,186 @@ int dgm_export_drawio(const dgm_doc_t *d, const char *path, char *err, size_t er
   if (ferror(f)) { fclose(f); if (err) snprintf(err, errsz, "short write on %s", path); return -1; }
   fclose(f);
   return 0;
+}
+
+/* ── Mermaid export ─────────────────────────────────────────────────────────
+ *
+ * The same objects written as a Mermaid `graph`, which GitHub, GitLab and most
+ * Markdown viewers render as a real diagram. Where the ASCII is the picture
+ * itself, this is the *graph behind* it: who is joined to whom, with the layout
+ * handed to Mermaid's own engine. So the two are complementary rather than
+ * rival renderings, and the mode lets you pick which one `q` drops in the
+ * buffer.
+ *
+ * What does not survive: free-standing lines (a Mermaid edge joins two nodes,
+ * so a line with no ends to join has nothing to become) and the raw layer.
+ * dgm_mermaid_dropped() counts those up front so the caller can say so. */
+
+/* Every node shape we draw, in the nearest Mermaid bracket. `%s` takes the
+   already-escaped label. Mermaid has no cloud or actor: the asymmetric flag
+   reads as "somewhere else", and a double circle stands out as a participant,
+   which is close enough to keep them distinguishable on the page. */
+static const char *mermaid_brackets(int kind, int shape)
+{
+  if (kind == DGM_TEXT) return "[\"%s\"]";        /* styled borderless below */
+  switch (shape) {
+  case DGM_ROUNDED:  return "(\"%s\")";
+  case DGM_DIAMOND:  return "{\"%s\"}";
+  case DGM_CIRCLE:   return "((\"%s\"))";
+  case DGM_ELLIPSE:  return "([\"%s\"])";         /* stadium */
+  case DGM_CLOUD:    return ">\"%s\"]";           /* asymmetric: external */
+  case DGM_CYLINDER: return "[(\"%s\")]";
+  case DGM_HEXAGON:  return "{{\"%s\"}}";
+  case DGM_ACTOR:    return "(((\"%s\")))";       /* double circle: a participant */
+  default:           return "[\"%s\"]";
+  }
+}
+
+/* Mermaid reads a quoted label almost verbatim, but '"' would end it and '#'
+   starts an entity, so both go through its own #NN; escapes. Our newlines
+   become the <br/> Mermaid wraps labels with. */
+static void mermaid_escape(const char *in, char *out, size_t outsz)
+{
+  size_t n = 0;
+  for (; *in && n + 10 < outsz; in++) {
+    const char *rep = NULL;
+    switch (*in) {
+    case '"':  rep = "#quot;"; break;
+    case '#':  rep = "#35;";   break;
+    case '\n': rep = "<br/>";  break;
+    default:   break;
+    }
+    if (rep) { size_t l = strlen(rep); memcpy(out + n, rep, l); n += l; }
+    else out[n++] = *in;
+  }
+  out[n] = '\0';
+  if (!n) { /* an unlabelled node still needs something between the brackets */
+    out[0] = ' '; out[1] = '\0';
+  }
+}
+
+/* Append to a bounded buffer, reporting overflow once. */
+static int mermaid_put(char *out, size_t outsz, size_t *n, const char *fmt, ...)
+{
+  va_list ap;
+  int k;
+  if (*n >= outsz) return -1;
+  va_start(ap, fmt);
+  k = vsnprintf(out + *n, outsz - *n, fmt, ap);
+  va_end(ap);
+  if (k < 0 || (size_t)k >= outsz - *n) { *n = outsz; return -1; }
+  *n += (size_t)k;
+  return 0;
+}
+
+int dgm_mermaid_dropped(const dgm_doc_t *d)
+{
+  int i, dropped = 0;
+  for (i = 0; i < d->n; i++)
+    if (d->s[i].kind == DGM_LINE) dropped++;
+  if (d->has_raw) {
+    int x, y;
+    for (y = 0; y < DGM_H; y++)
+      for (x = 0; x < DGM_W; x++)
+        if (d->raw[y][x] && d->raw[y][x] != ' ') { dropped++; y = DGM_H; break; }
+  }
+  return dropped;
+}
+
+int dgm_to_mermaid(const dgm_doc_t *d, char *out, size_t outsz)
+{
+  char label[DGM_LABEL_MAX * 8], shaped[DGM_LABEL_MAX * 8 + 32];
+  size_t n = 0;
+  int i, across = 0, down = 0, nedge = 0, ntext = 0;
+
+  if (!out || outsz < 32) return -1;
+  out[0] = '\0';
+
+  /* Which way does the graph want to run? Mermaid lays the nodes out itself, so
+     the one thing worth carrying over from the drawing is its grain: if most
+     links travel further sideways than up and down, the diagram was drawn as a
+     left-to-right flow and should stay one. */
+  for (i = 0; i < d->n; i++) {
+    const dgm_shape_t *s = &d->s[i];
+    const dgm_shape_t *a, *b;
+    int dx, dy;
+    if (s->kind != DGM_CONN) continue;
+    if (s->from < 0 || s->to < 0 || s->from >= d->n || s->to >= d->n) continue;
+    a = &d->s[s->from]; b = &d->s[s->to];
+    dx = (b->x + b->w / 2) - (a->x + a->w / 2);
+    dy = (b->y + b->h / 2) - (a->y + a->h / 2);
+    /* a cell is about twice as tall as it is wide, so halve the horizontal
+       reach before comparing — otherwise everything looks like it flows across */
+    if ((dx < 0 ? -dx : dx) / 2 > (dy < 0 ? -dy : dy)) across++; else down++;
+  }
+  if (mermaid_put(out, outsz, &n, "graph %s\n", across > down ? "LR" : "TD") != 0)
+    return -1;
+
+  for (i = 0; i < d->n; i++) {            /* nodes and free text */
+    const dgm_shape_t *s = &d->s[i];
+    if (s->kind != DGM_NODE && s->kind != DGM_TEXT) continue;
+    mermaid_escape(s->label, label, sizeof label);
+    snprintf(shaped, sizeof shaped, mermaid_brackets(s->kind, s->shape), label);
+    if (mermaid_put(out, outsz, &n, "  n%d%s\n", i, shaped) != 0) return -1;
+    if (s->kind == DGM_TEXT) ntext++;
+  }
+
+  for (i = 0; i < d->n; i++) {            /* links, with their arrows and dashes */
+    const dgm_shape_t *s = &d->s[i];
+    const char *arrow;
+    if (s->kind != DGM_CONN) continue;
+    if (s->from < 0 || s->to < 0 || s->from >= d->n || s->to >= d->n) continue;
+    /* Mermaid has no dotted, so dashed and dotted share its -.- link. */
+    if (s->stroke != DGM_SOLID)
+      arrow = s->arrow_from && s->arrow_to ? "<-.->" : s->arrow_from ? "<-.-"
+            : s->arrow_to ? "-.->" : "-.-";
+    else
+      arrow = s->arrow_from && s->arrow_to ? "<-->" : s->arrow_from ? "<--"
+            : s->arrow_to ? "-->" : "---";
+    if (mermaid_put(out, outsz, &n, "  n%d %s n%d\n", s->from, arrow, s->to) != 0) return -1;
+    nedge++;
+  }
+
+  /* Free text is a node with nothing drawn round it — the closest Mermaid comes
+     to a floating label. */
+  if (ntext) {
+    if (mermaid_put(out, outsz, &n,
+                    "  classDef ccmText fill:none,stroke:none;\n") != 0) return -1;
+    for (i = 0; i < d->n; i++)
+      if (d->s[i].kind == DGM_TEXT &&
+          mermaid_put(out, outsz, &n, "  class n%d ccmText;\n", i) != 0) return -1;
+  }
+
+  for (i = 0; i < d->n; i++) {            /* colours, which the ASCII cannot keep */
+    const dgm_shape_t *s = &d->s[i];
+    char decl[160];
+    size_t dn = 0;
+    if (s->kind != DGM_NODE && s->kind != DGM_TEXT) continue;
+    if (s->fg == DGM_COLOR_DEFAULT && s->bg == DGM_COLOR_DEFAULT) continue;
+    decl[0] = '\0';
+    if (s->fg != DGM_COLOR_DEFAULT && s->fg < 16)
+      dn += (size_t)snprintf(decl + dn, sizeof decl - dn, "stroke:%s,color:%s",
+                             DRAWIO_HEX[s->fg], DRAWIO_HEX[s->fg]);
+    if (s->bg != DGM_COLOR_DEFAULT && s->bg < 16)
+      snprintf(decl + dn, sizeof decl - dn, "%sfill:%s", dn ? "," : "", DRAWIO_HEX[s->bg]);
+    if (decl[0] && mermaid_put(out, outsz, &n, "  style n%d %s\n", i, decl) != 0) return -1;
+  }
+
+  {                                       /* the same for the links */
+    int e = 0;
+    for (i = 0; i < d->n; i++) {
+      const dgm_shape_t *s = &d->s[i];
+      if (s->kind != DGM_CONN) continue;
+      if (s->from < 0 || s->to < 0 || s->from >= d->n || s->to >= d->n) continue;
+      if (s->fg != DGM_COLOR_DEFAULT && s->fg < 16 &&
+          mermaid_put(out, outsz, &n, "  linkStyle %d stroke:%s;\n", e, DRAWIO_HEX[s->fg]) != 0)
+        return -1;
+      e++;
+    }
+  }
+
+  if (nedge == 0 && n > 0 && !strchr(out + 6, 'n'))   /* nothing at all to show */
+    if (mermaid_put(out, outsz, &n, "  %%%% (empty diagram)\n") != 0) return -1;
+
+  return (int)n;
 }

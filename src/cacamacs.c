@@ -80,6 +80,7 @@ int                        g_folding = 0;         /* folding mode on? */
 int             g_cfg_tab = 8, g_cfg_spaces = 1, g_cfg_indent = 2;   /* global defaults */
 int             g_cfg_edge = 0;                                       /* edge/ruler column */
 int             g_cfg_logfiles = 0;   /* off unless config.json says otherwise */
+int             g_cfg_dgm_mermaid = 0;   /* diagram mode writes ASCII unless told otherwise */
 lang_override_t g_overrides[32];
 int             g_noverrides = 0;
 int             g_tab_size = 8, g_insert_spaces = 1, g_indent_size = 2; /* effective */
@@ -248,12 +249,17 @@ static int write_default_config(void)
     "  \"//logFiles\": \"append every file opened (O) and written (W) to files.log\",\n"
     "  \"logFiles\": %s,\n"
     "\n"
+    "  \"//diagram-mermaid-default\": \"M-x diagram writes a Mermaid graph rather than\",\n"
+    "  \"//diagram-mermaid-default2\": \"ASCII art; C-x q switches either way while drawing\",\n"
+    "  \"diagram-mermaid-default\": %s,\n"
+    "\n"
     "  \"//languages\": \"per-extension overrides of the three indent settings,\",\n"
     "  \"//languages ex\": \"e.g. \\\".c\\\": { \\\"insertSpaces\\\": false, \\\"tabSize\\\": 8 }\",\n"
     "  \"languages\": {}\n"
     "}\n",
     g_cfg_tab, g_cfg_spaces ? "true" : "false", g_cfg_indent,
-    g_cfg_edge, g_cfg_logfiles ? "true" : "false");
+    g_cfg_edge, g_cfg_logfiles ? "true" : "false",
+    g_cfg_dgm_mermaid ? "true" : "false");
 
   if (ferror(f) || fclose(f) != 0) {
     fprintf(stderr, "ccm: failed writing %s\n", path);

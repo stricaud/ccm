@@ -18,9 +18,12 @@ diagrams. Pick a shape from the pane on the left — box, rounded, diamond,
 circle, ellipse, cloud, cylinder, hexagon, actor or free text — drop it on the
 canvas with the mouse or the keyboard, link any two by clicking one then the
 other, draw plain lines and freehand strokes, rub out single characters with the
-eraser, and colour or dash anything. Leaving drops the finished art into your
-document at the cursor — plain characters, saved with `C-x C-s` like anything
-else — and `C-w` keeps a `.drawio` copy that preserves the colours.
+eraser, and colour or dash anything. Drag a band round several objects (or
+Shift-click them) and they move, restyle and delete together. Leaving drops the
+finished art into your document at the cursor — plain characters, saved with
+`C-x C-s` like anything else — or, with `C-x q`, a **Mermaid graph** that
+GitHub and most Markdown viewers draw for real. `C-w` keeps a `.drawio` or
+`.mmd` copy that preserves the colours.
 
 ```
                          +-------+              .-----------.

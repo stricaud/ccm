@@ -149,6 +149,7 @@ void load_config(void)
   g_cfg_indent = _json_int(root, "indentSize", g_cfg_indent);
   g_cfg_edge   = _json_int(root, "edgeColumn", g_cfg_edge);
   g_cfg_logfiles = _json_bool(root, "logFiles", g_cfg_logfiles);
+  g_cfg_dgm_mermaid = _json_bool(root, "diagram-mermaid-default", g_cfg_dgm_mermaid);
 
   /* per-language overrides keyed by file extension, e.g. ".py": { ... } */
   langs = gtcaca_json_object_get(root, "languages");

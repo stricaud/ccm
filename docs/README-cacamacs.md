@@ -359,16 +359,52 @@ demand for whatever is selected.
 | gesture | what it does |
 | --- | --- |
 | drag anywhere on an object | move it |
-| drag its `#` bottom-right corner | resize it |
-| drag an `o` edge handle onto another object | link the two |
+| drag its `#` bottom-right corner | resize it — the opposite corner stays put, so the box follows the pointer wherever it goes, including back past that corner |
+| drag an `o` edge handle onto another object | link the two, leaving by that edge and arriving at whichever edge you let go nearest |
+| drag the `l Link` row out of the pane onto an object | start a link from it, then click the object to link to |
 | double-click an object | type its label, centred inside it (the toolkit times the click; `gtcaca_set_double_click_time()` tunes it) |
 | click a link or a line | select it |
-| drag empty space | pan the canvas |
+| click an object while several are selected | go back to just that one |
+| Shift-click an object | add it to the selection, or take it back out |
+| drag empty space | a rubber band: everything it touches is selected (Shift keeps what was already picked) |
+| middle- or right-drag | pan the canvas |
 | wheel | scroll |
 
 A selected object shows what each part does: `#` at the bottom right resizes,
 an `o` at the middle of each edge starts a link, and everywhere else — sides
-included — moves it.
+included — moves it. The markers are drawn from the same rule the mouse is
+tested against, so a handle is exactly as big as it looks: on a roomy shape
+they widen to a couple of cells rather than the single one a terminal pointer
+has to hit dead on.
+
+### Several objects at once
+
+Drag a band round a group, or Shift-click them one by one, and everything that
+follows acts on all of them: dragging any member moves the group, and the
+arrows, `C`, `B`, `S`, `<` `>` `[` `]`, `r`, `x`, `D` and `Del` apply to every
+one. A link comes along when both of its ends do, so a band drawn round a
+cluster picks the cluster up whole rather than leaving its arrows behind.
+
+**Clicking one member goes back to just that one**, so you are never stuck with
+a group: press-and-drag moves them all, press-and-release picks the one under
+the pointer. Resizing and linking always act on the single object you grabbed,
+group or no group.
+
+The modeline counts what is picked (`select 3 selected`). Only one of them —
+the one picked last — carries the `#` and `o` handles, and is washed brighter
+than the rest, so there is never any doubt about which object a drag from a
+handle would resize or link.
+
+Shift-click is a shortcut, not the only route: many terminals keep Shift-click
+for their own text selection and never pass it to the program. The band and `m`
+do the same job everywhere, which is why they exist alongside it.
+
+| key | |
+| --- | --- |
+| `m` | add the next object to the selection |
+| `A` | select everything |
+| `Tab` | start again from a single object |
+| `C-g` | clear the selection |
 
 ### Keys
 
@@ -385,8 +421,10 @@ Style    a cycle a link's arrowheads   s ASCII ↔ Unicode line drawing
 Draw     f freehand (Space picks the character)   - a plain line, no arrows
 Style    C colour   B background   S solid / dashed / dotted
 Erase    e eraser: rub out single characters   x object → plain characters
-Export   C-w write a .drawio copy that keeps the colours
-Leaving  q insert the diagram at the cursor and leave   Q leave it behind
+Group    m add the next object to the selection   A select all
+Export   C-w write a copy to a file: .drawio, or .mmd for Mermaid
+Leaving  q insert at the cursor and leave — it asks for ASCII or Mermaid first
+         Q leave the drawing behind          C-x q the same question as q
          (then C-x C-s saves the buffer, C-/ undoes the insert)   ? help
 ```
 
@@ -401,16 +439,68 @@ Four shapes are ASCII in either mode — diamond, circle, cloud, hexagon and the
 actor are built from `/ \ < > ( ) ~`, which have no box-drawing equivalents, so
 they draw the same way in both.
 
-### Keeping the colours: a .drawio copy
+### Keeping the colours: a copy in a file of its own
 
-`C-w` writes the same objects out as a **draw.io** file (`.drawio`, mxGraph XML)
-next to the file you are editing. That copy keeps everything plain text cannot:
+`C-w` writes the same objects out to a file beside the one you are editing. The
+name you give it picks the format: `.mmd` (or `.mermaid`) writes the Mermaid
+graph, anything else a **draw.io** file (`.drawio`, mxGraph XML). That copy keeps everything plain text cannot:
 colours, backgrounds, dash patterns, and each shape as a real shape — a diamond
 is a rhombus, a cylinder a cylinder, an actor a stick figure — with the links
 still joining the right two. Open it at app.diagrams.net.
 
 It is a *copy*, not a substitute: `q` still drops the ASCII into your document
 the same way, and the buffer is still saved with `C-x C-s`.
+
+### Which side a link leaves by
+
+The handle you drag from decides where the link attaches, and where you let go
+decides where it arrives. Drag out of a box's right-hand side and the arrow
+stays on the right-hand side, going around both boxes if the other one is off
+to the left. Starting a link by *clicking* instead — the `l` tool, or `c` from
+the keyboard — leaves the choice to the router, which picks the facing edges
+from where the two objects sit, exactly as it always did.
+
+Because links can be told apart by their sides, two objects may be joined more
+than once: a request and a reply want two arrows, not one. The only thing
+refused is a second link along a route that already exists, since it would land
+exactly on the first and be invisible. One handle can also feed as many links
+as you like, out to as many different objects.
+
+One limit worth knowing: the file is the ASCII art and nothing else, so two
+routes that *touch* are a single run of characters by the time it is written
+out. Reopening reads those back as one link, and the picture can shift. Leave a
+little room between links running alongside each other and the round trip is
+exact.
+
+### ASCII art or a Mermaid graph
+
+`q` drops the diagram into the buffer. What it drops is your choice:
+
+- **ASCII art** — the picture itself. It needs nothing to read it, so it goes
+  into a README, a comment block or an email and simply looks right.
+- **A Mermaid graph** — the graph *behind* the picture. GitHub, GitLab and most
+  Markdown viewers lay it out and draw it for real, so it keeps the colours and
+  the true shapes (a diamond is a rhombus, a cylinder a cylinder) that plain
+  text cannot hold.
+
+`q` asks which one before inserting — a small dialog with an **ascii** and a
+**mermaid** button — and remembers the answer, so the modeline then says which
+is in force (`q inserts mermaid at the cursor`). `C-x q` raises the same
+question, and Escape cancels it and leaves you in the drawing. In a Markdown
+buffer the Mermaid goes in a ```` ```mermaid ```` fence, which is what makes a
+viewer draw it rather than print it.
+
+The setting below decides which button starts highlighted, so if you always
+want the same format, `q` then Enter gives it to you:
+
+```json
+{ "diagram-mermaid-default": true }
+```
+
+What Mermaid cannot carry, and the mode says so when it happens: the
+hand-placed geometry (Mermaid does its own layout), free-standing lines — an
+edge needs two ends to join — and any loose characters in the raw layer. When
+those matter, the ASCII is the form that keeps them.
 
 ### Reopening a file
 
@@ -424,7 +514,8 @@ through diagram mode never loses characters.
 Two consequences worth knowing:
 
 - A link is redrawn by the router, so a hand-drawn line that wandered comes back
-  as a tidy elbow between the same two objects.
+  as a tidy elbow between the same two objects — but which edges it attached to
+  is read off the art, so a link drawn out of one side stays on that side.
 - Dashed and dotted lines come back as loose characters rather than line
   objects: the recogniser looks for unbroken runs. They still draw and save
   exactly as they were; they just are not draggable until redrawn.

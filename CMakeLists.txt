@@ -94,6 +94,23 @@ pkg_check_modules(LIBCACA REQUIRED caca)
 message(STATUS "gtcaca:  ${GTCACA_LDFLAGS}")
 message(STATUS "libcaca: ${LIBCACA_LDFLAGS}")
 
+# Shift-click in diagram mode needs gtcaca_mouse_modifiers(), which older
+# toolkits do not have. gtcaca.pc reports no useful version (0.0.0), so there is
+# nothing to compare against — ask the header itself instead. Without it ccm
+# still builds and every gesture still works: the rubber band and `m` select
+# several objects on any terminal, which is what they are for, since plenty of
+# terminals keep Shift-click for their own text selection anyway.
+include(CheckSymbolExists)
+set(CMAKE_REQUIRED_INCLUDES ${GTCACA_INCLUDE_DIRS} ${LIBCACA_INCLUDE_DIRS})
+set(CMAKE_REQUIRED_LIBRARIES ${GTCACA_LDFLAGS})   # the probe links, not just compiles
+check_symbol_exists(gtcaca_mouse_modifiers "gtcaca/main.h" HAVE_GTCACA_MOUSE_MODIFIERS)
+unset(CMAKE_REQUIRED_INCLUDES)
+unset(CMAKE_REQUIRED_LIBRARIES)
+if(NOT HAVE_GTCACA_MOUSE_MODIFIERS)
+  message(STATUS "gtcaca has no gtcaca_mouse_modifiers(): "
+                 "Shift-click multi-select is off (drag a band or press m instead)")
+endif()
+
 add_executable(ccm
   src/cacamacs.c src/games.c src/diag.c
   src/edit.c src/search.c src/keymap.c src/lang.c src/ui.c src/lock.c
@@ -102,6 +119,9 @@ add_executable(ccm
 # Compiled-in version string for `ccm --version` (the packaging smoke test's
 # entry point — it forces the loader to resolve every dylib/DLL, then exits).
 target_compile_definitions(ccm PRIVATE CCM_VERSION_STR="${CCM_VERSION}")
+if(HAVE_GTCACA_MOUSE_MODIFIERS)
+  target_compile_definitions(ccm PRIVATE CCM_HAVE_MOUSE_MODIFIERS=1)
+endif()
 
 target_include_directories(ccm PRIVATE
   src

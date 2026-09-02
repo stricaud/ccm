@@ -49,6 +49,13 @@ enum {
 
 enum { DGM_STYLE_ASCII = 0, DGM_STYLE_UNICODE };
 
+/* Which edge of a node a connector leaves by. AUTO lets the router work it out
+   from where the two objects sit — what a link gets when it was not started
+   from a particular handle, and what every link used to do. Naming the sides is
+   what keeps a link drawn out of the right-hand side on the right-hand side,
+   and what lets two links between the same pair take different routes. */
+enum { DGM_SIDE_AUTO = 0, DGM_SIDE_TOP, DGM_SIDE_BOTTOM, DGM_SIDE_LEFT, DGM_SIDE_RIGHT };
+
 /* How a line or a link is stroked. Dashes and dots are drawn with the
    characters themselves, so they survive into the saved ASCII; colour cannot,
    and lives only on screen and in a .drawio export. */
@@ -62,6 +69,7 @@ typedef struct {
   int  x, y, w, h;              /* node: outer rectangle; text: origin + span */
   char label[DGM_LABEL_MAX];    /* node/text content ('\n' separates lines)   */
   int  from, to;                /* connector: the two objects it joins        */
+  int  from_side, to_side;      /* connector: DGM_SIDE_* each end attaches to */
   int  arrow_from, arrow_to;    /* connector: arrowhead at either end         */
   int  dir;                     /* line: 0 runs '\', 1 runs '/' across x/y/w/h */
   int  fg, bg;                  /* ANSI colours, or DGM_COLOR_DEFAULT          */
@@ -103,12 +111,23 @@ void dgm_line_snap(int x0, int y0, int *x1, int *y1);
 void dgm_line_set(dgm_doc_t *d, int idx, int x0, int y0, int x1, int y1);
 /* The character a run in this direction is drawn with, for previews. */
 uint32_t dgm_line_glyph(int dx, int dy, int style);
-/* Join any two objects — nodes of any shape, and free text too. Two objects
-   are either linked or not: asking again, in either direction, returns the link
-   that is already there rather than stacking a second one on the same route. */
+/* Join any two objects — nodes of any shape, and free text too — leaving the
+   router to choose where the link attaches. */
 int  dgm_add_conn(dgm_doc_t *d, int from, int to);
+/* The same, naming the edge each end leaves by. Two links between one pair are
+   allowed as long as they do not take the same route: asking again for a link
+   that already exists with the same two sides returns the one already there,
+   rather than stacking an invisible second copy on top of it. */
+int  dgm_add_conn_sides(dgm_doc_t *d, int from, int to, int from_side, int to_side);
 /* The link between `a` and `b` whichever way round it points, or -1. */
 int  dgm_find_conn(const dgm_doc_t *d, int a, int b);
+/* The link between `a` and `b` leaving by these sides, or -1. */
+int  dgm_find_conn_sides(const dgm_doc_t *d, int a, int b, int from_side, int to_side);
+/* Which handle of `idx` covers (x, y) — the side a link dragged from there
+   leaves by — or DGM_SIDE_AUTO when that cell is not one of the handles. */
+int  dgm_handle_side(const dgm_doc_t *d, int idx, int x, int y);
+/* The edge of `idx` nearest (x, y): where a link let go there should arrive. */
+int  dgm_nearest_side(const dgm_doc_t *d, int idx, int x, int y);
 /* Redraw an existing node as a different shape (its rectangle is kept, grown
    to the new shape's minimum if that shape needs more room). */
 void dgm_set_shape(dgm_doc_t *d, int idx, int shape);
@@ -171,6 +190,17 @@ int dgm_to_text(const dgm_doc_t *d, char *out, size_t outsz);
    lines joining them become objects; anything left over is kept in the raw
    layer. Returns the number of objects recognised. */
 int dgm_parse_text(dgm_doc_t *d, const char *text);
+/* Render the same objects as a Mermaid `graph`, which Markdown viewers draw for
+   real. The ASCII is the picture; this is the graph behind it, laid out by
+   Mermaid rather than by hand — so it keeps shapes, labels, arrows and colours,
+   and loses the hand-placed geometry along with anything that is not a node or
+   a link. Returns the byte length written (excluding the NUL), or -1 if `out`
+   is too small. */
+int dgm_to_mermaid(const dgm_doc_t *d, char *out, size_t outsz);
+/* How much of the diagram Mermaid cannot carry: free-standing lines (an edge
+   needs two ends to join) plus one for a non-empty raw layer. 0 means the
+   Mermaid version says everything the ASCII does. */
+int dgm_mermaid_dropped(const dgm_doc_t *d);
 /* ── the raw layer ─────────────────────────────────────────────────────────
    Characters the recogniser could not account for are kept verbatim. They are
    not objects, so they are edited a cell at a time — that is what the eraser

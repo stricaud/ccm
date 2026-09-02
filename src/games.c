@@ -9,6 +9,49 @@
 #include <gtcaca/main.h>
 #include "cacamacs.h"
 
+/* ── one key, with the mouse kept out of it ─────────────────────────────────
+ *
+ * The games run their own caca_get_event() loop instead of gtcaca's, so they
+ * see the terminal exactly as it was left: with SGR mouse reporting turned on
+ * (gtcaca_main enables 1002/1006 and switches libcaca's own decoder off, so the
+ * reports are meant for gtcaca's parser). A click therefore arrives here not as
+ * a mouse event but as the raw characters ESC [ < b ; x ; y M — and the leading
+ * ESC read as "quit", so clicking anywhere ended the game.
+ *
+ * Read through it instead: an ESC followed straight away by '[' is the start of
+ * a sequence the game has no use for, so swallow the whole thing up to its
+ * final byte and report that nothing happened. A lone ESC — nothing following
+ * within the wait — is the key the player pressed.
+ *
+ * Returns the key, or GAME_KEY_NONE if the timeout passed (or a sequence was
+ * swallowed). `timeout_us` is microseconds, -1 to block. */
+
+#define GAME_KEY_NONE   (-1)
+#define GAME_SEQ_WAIT_US 30000   /* a sequence arrives in one packet; this is slack */
+
+static int game_key(int timeout_us)
+{
+  caca_event_t ev;
+  int k, i;
+
+  if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, timeout_us)) return GAME_KEY_NONE;
+  k = caca_get_event_key_ch(&ev);
+  if (k != CACA_KEY_ESCAPE) return k;
+
+  if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, GAME_SEQ_WAIT_US))
+    return CACA_KEY_ESCAPE;                      /* nothing followed: a real Escape */
+  if (caca_get_event_key_ch(&ev) != '[')
+    return CACA_KEY_ESCAPE;                      /* Meta-something: Escape is the useful half */
+
+  /* CSI: run to the final byte (0x40..0x7e), which for a mouse report is M or m. */
+  for (i = 0; i < 32; i++) {
+    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, GAME_SEQ_WAIT_US)) break;
+    k = caca_get_event_key_ch(&ev);
+    if (k >= 0x40 && k <= 0x7e) break;
+  }
+  return GAME_KEY_NONE;
+}
+
 /* ── snake / nibbles (M-x snake) ────────────────────────────────────────────
  * A self-contained worm game in the spirit of the classic Nibbles: steer the
  * worm to eat the numbered targets 1..9, growing each time; clear all nine to
@@ -135,7 +178,6 @@ void run_snake(void)
   int cap = W * H, head = 0, tail = 0, len = 0, dx = 1, dy = 0, ndx = 1, ndy = 0;
   int fx = 0, fy = 0, level = 0, number = 1, score = 0, lives = 5;
   int running = 1, started = 0, x, y;
-  caca_event_t ev;
 
   if (W < 20 || H < 8) { snprintf(g_message, sizeof g_message, "Window too small for snake"); return; }
   snake_ox = (CW - W) / 2;          /* centre the play field on the canvas */
@@ -157,8 +199,8 @@ void run_snake(void)
     caca_printf(gmo.cv, ox + W / 2 - 18, oy + H / 2 + 2, "Steer with the arrows.  p pauses, q quits.");
     caca_refresh_display(gmo.dp);
     while (!chosen) {
-      if (caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) {
-        int k = caca_get_event_key_ch(&ev);
+      {
+        int k = game_key(-1);
         if (k >= '1' && k <= '9') { level = k - '1'; chosen = 1; }
         else if (k == CACA_KEY_RETURN || k == 10 || k == ' ') { level = 0; chosen = 1; }
         else if (k == 'q' || k == 'Q' || k == CACA_KEY_ESCAPE) { free(g); free(body); gtcaca_redraw(); return; }
@@ -198,14 +240,14 @@ void run_snake(void)
        timeout is in MICROSECONDS, so a playable ~8 moves/sec is ~120000us,
        getting a little faster each level. ── */
     int tick_ms = 130 - level * 8; if (tick_ms < 70) tick_ms = 70;
-    if (caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, started ? tick_ms * 1000 : -1)) {
-      int k = caca_get_event_key_ch(&ev);
+    {
+      int k = game_key(started ? tick_ms * 1000 : -1);
       if (k == 'q' || k == 'Q' || k == CACA_KEY_ESCAPE) { running = 0; continue; }
       if (k == 'p' || k == 'P') {            /* pause */
         caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, CACA_BOLD);
         caca_printf(gmo.cv, snake_ox + W / 2 - 5, snake_oy + H / 2 - 4, " paused ");
         caca_refresh_display(gmo.dp);
-        caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1);
+        while (game_key(-1) == GAME_KEY_NONE) ;
         continue;
       }
       /* any arrow starts the game; the direction is taken unless it reverses */
@@ -234,8 +276,7 @@ void run_snake(void)
         caca_printf(gmo.cv, snake_ox + W / 2 - 14, snake_oy + H / 2, "  GAME OVER  -  score %d  -  r restart, q quit  ", score);
         caca_refresh_display(gmo.dp);
         for (;;) {
-          caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1);
-          { int k = caca_get_event_key_ch(&ev);
+          { int k = game_key(-1);
             if (k == 'r' || k == 'R') { level = 0; number = 1; score = 0; lives = 5; started = 0;
               snake_build_level(g, W, H, level); snake_reset_worm(g, W, H, body, &head, &tail, &len, &dx, &dy);
               ndx = dx; ndy = dy; snake_place_food(g, W, H, &fx, &fy); break; }
@@ -730,7 +771,6 @@ void run_sokoban(void)
   int idx = 1, moves = 0, running = 1, undo_n = 0;
   sok_level_t L;
   sok_move_t *undo = malloc(sizeof(sok_move_t) * 8192);
-  caca_event_t ev;
 
   if (!undo) return;
   if (!sok_get(have_dir, dir, idx, &L)) { have_dir = 0; sok_get(0, dir, idx, &L); }
@@ -764,8 +804,8 @@ void run_sokoban(void)
     }
     caca_refresh_display(gmo.dp);
 
-    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
-    k = caca_get_event_key_ch(&ev);
+    k = game_key(-1);
+    if (k == GAME_KEY_NONE) continue;
 
     if (k == 'q' || k == 'Q' || k == CACA_KEY_ESCAPE) { running = 0; continue; }
     if (k == 'r' || k == 'R') { sok_get(have_dir, dir, idx, &L); moves = 0; undo_n = 0; continue; }
@@ -892,7 +932,6 @@ void run_bird(void)
   bird_pipe_t pipes[BIRD_MAXPIPES];
   int npipe = 0, i, x, y;
   static int best = 0;                       /* best of this session */
-  caca_event_t ev;
 
   if (W < 24 || H < 10) { snprintf(g_message, sizeof g_message, "Window too small for bird"); return; }
   bird_ox = 0; bird_oy = 0;
@@ -916,8 +955,8 @@ void run_bird(void)
     caca_printf(gmo.cv, W / 2 - 20, H / 2 + 5, "Space starts.  p pauses, q quits.");
     caca_refresh_display(gmo.dp);
     while (!chosen) {
-      if (caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) {
-        int k = caca_get_event_key_ch(&ev);
+      {
+        int k = game_key(-1);
         if (k == 'q' || k == 'Q' || k == CACA_KEY_ESCAPE) { gtcaca_redraw(); return; }
         /* Space here means "go" — asking for it twice (once to leave the title,
            once to take off) reads as the game ignoring the first press. */
@@ -964,14 +1003,14 @@ restart:
     caca_refresh_display(gmo.dp);
 
     /* ── input; the timeout is what makes gravity tick (microseconds) ── */
-    if (caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, started ? tick_ms * 1000 : -1)) {
-      int k = caca_get_event_key_ch(&ev);
+    {
+      int k = game_key(started ? tick_ms * 1000 : -1);
       if (k == 'q' || k == 'Q' || k == CACA_KEY_ESCAPE) { running = 0; continue; }
       if (k == 'p' || k == 'P') {
         caca_set_color_ansi(gmo.cv, CACA_WHITE, CACA_BLACK); caca_set_attr(gmo.cv, CACA_BOLD);
         caca_printf(gmo.cv, W / 2 - 5, top + 1, " paused ");
         caca_refresh_display(gmo.dp);
-        caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1);
+        while (game_key(-1) == GAME_KEY_NONE) ;
         continue;
       }
       if (k == '+' || k == '=') {           /* faster, and worth more — no way back */
@@ -1041,8 +1080,7 @@ restart:
       caca_printf(gmo.cv, W / 2 - 22, H / 2, "  DOWN  -  score %d  -  best %d  -  r restart, q quit  ", score, best);
       caca_refresh_display(gmo.dp);
       for (;;) {
-        caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1);
-        { int k = caca_get_event_key_ch(&ev);
+        { int k = game_key(-1);
           if (k == 'r' || k == 'R') goto restart;
           if (k == 'q' || k == 'Q' || k == CACA_KEY_ESCAPE) { running = 0; break; } }
       }
@@ -1463,7 +1501,6 @@ void run_wordguess(int wild)
   char seen[26];
   char msg[80];
   int row = 0, col = 0, over = 0, won = 0, running = 1, played = 0, wins = 0;
-  caca_event_t ev;
 
   if (!wg_layout(&L, W, H)) {
     snprintf(g_message, sizeof g_message, "Window too small for wordguess");
@@ -1528,8 +1565,8 @@ new_game:
     caca_refresh_display(gmo.dp);
 
     /* ── input ── */
-    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
-    k = caca_get_event_key_ch(&ev);
+    k = game_key(-1);
+    if (k == GAME_KEY_NONE) continue;
     if (k >= 'A' && k <= 'Z') k = k - 'A' + 'a';
     msg[0] = '\0';
 
