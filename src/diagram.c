@@ -88,6 +88,14 @@ static int  g_sel = -1;                         /* the primary selection, -1 for
 static unsigned char g_multi[DGM_MAX_SHAPES];
 static int  g_nmulti;
 static int  g_band_add;                         /* the rubber band adds rather than replaces */
+/* ── the clipboard ──────────────────────────────────────────────────────────
+   Copying keeps the objects themselves, not a picture of them: the links
+   *between* copied objects come along renumbered, while a link with only one
+   end in the selection is left behind — there would be nothing at the far end
+   of it. Positions are stored relative to the selection's top-left corner, so
+   a paste lands where the cursor is rather than back on top of the original. */
+static dgm_shape_t g_clip[DGM_MAX_SHAPES];
+static int  g_nclip;
 static int  g_click_sel = -1;                   /* pressed inside a group: the one to keep if
                                                    the press turns out to be a click, not a drag */
 static int  g_tool = TOOL_SELECT;
@@ -462,6 +470,9 @@ static const char *const help_lines[] = {
   "            < > or H L   narrower / wider     [ ] or K J   shorter / taller",
   "            r        change the shape            a     flip a link's arrows",
   "            Del / d  delete      D duplicate     u     undo",
+  "            C-x C-w  cut         C-x w copy      C-y   paste at the cursor",
+  "              (links between copied objects come too; one with only a single",
+  "               end in the selection is left behind)",
   "            s        ASCII / Unicode line drawing",
   "            q insert the diagram at the cursor and leave — it asks whether",
   "              to insert the ASCII art or a Mermaid graph first (C-x C-s",
@@ -762,7 +773,7 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
     int cl_x = 0, cl_y = 0, cl_h = 0;
     int maxw = is_node ? s->w - 2 : view_w();
     int ly;
-    if (is_conn && !conn_label_spot(g_doc, g_sel, &cl_x, &cl_y, &cl_h)) is_conn = 0;
+    if (is_conn && !conn_label_spot(g_doc, g_sel, &cl_x, &cl_y, &cl_h, NULL)) is_conn = 0;
     ly = is_conn ? cl_y : is_node ? s->y + s->h / 2 : s->y;
     const char *shown = g_edit_buf;
     const char *nl = strrchr(g_edit_buf, '\n');
@@ -773,7 +784,7 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
     if (n > maxw - 1) off = n - (maxw - 1);      /* keep the caret in view */
     /* Centre it in the shape, the way it will be drawn once committed — typing
        into a box should look like the finished label, not like a field. */
-    lx = is_conn ? (cl_h ? cl_x - (n - off) / 2 : cl_x)
+    lx = is_conn ? cl_x - (n - off) / 2      /* the text is centred on the line */
        : is_node ? s->x + 1 + (s->w - 2 - (n - off) - 1) / 2 : s->x;
     if (!is_conn && lx < s->x + (is_node ? 1 : 0)) lx = s->x + (is_node ? 1 : 0);
     if (lx < 0) lx = 0;
@@ -1252,6 +1263,95 @@ static void move_selection(int dx, int dy)
   g_modified = 1;
 }
 
+/* Put the selection on the clipboard. Returns how many objects it took. */
+static int copy_selection(void)
+{
+  int map[DGM_MAX_SHAPES], i, n = 0, minx = DGM_W, miny = DGM_H;
+
+  for (i = 0; i < g_doc->n; i++) map[i] = -1;
+  for (i = 0; i < g_doc->n; i++) {
+    const dgm_shape_t *s = &g_doc->s[i];
+    if (!g_multi[i] || s->kind == DGM_CONN) continue;
+    map[i] = n++;
+    if (s->x < minx) minx = s->x;
+    if (s->y < miny) miny = s->y;
+  }
+  if (!n) return 0;
+  n = 0;
+  for (i = 0; i < g_doc->n; i++) {
+    if (map[i] < 0) continue;
+    g_clip[n] = g_doc->s[i];
+    g_clip[n].x -= minx;
+    g_clip[n].y -= miny;
+    n++;
+  }
+  /* A link comes whenever both of its ends did, whether or not the link itself
+     was picked — copying two joined boxes and losing the arrow between them is
+     never what was meant. */
+  for (i = 0; i < g_doc->n && n < DGM_MAX_SHAPES; i++) {
+    const dgm_shape_t *s = &g_doc->s[i];
+    if (s->kind != DGM_CONN) continue;
+    if (s->from < 0 || s->to < 0 || s->from >= g_doc->n || s->to >= g_doc->n) continue;
+    if (map[s->from] < 0 || map[s->to] < 0) continue;
+    g_clip[n] = *s;
+    g_clip[n].from = map[s->from];
+    g_clip[n].to   = map[s->to];
+    n++;
+  }
+  g_nclip = n;
+  return n;
+}
+
+/* Drop the clipboard onto the canvas at the keyboard cursor, and select what
+   arrived so it can be moved straight away. */
+static void paste_clip(void)
+{
+  int map[DGM_MAX_SHAPES], i, base = g_doc->n, npasted = 0;
+
+  if (!g_nclip) {
+    snprintf(g_dgm_msg, sizeof g_dgm_msg, "Nothing copied yet — C-x w copies the selection");
+    return;
+  }
+  undo_push();
+  for (i = 0; i < g_nclip; i++) map[i] = -1;
+  for (i = 0; i < g_nclip; i++) {
+    dgm_shape_t *s;
+    if (g_clip[i].kind == DGM_CONN || g_doc->n >= DGM_MAX_SHAPES) continue;
+    s = &g_doc->s[g_doc->n];
+    *s = g_clip[i];
+    s->x += g_cur_x;
+    s->y += g_cur_y;
+    if (s->x + s->w > DGM_W) s->x = DGM_W - s->w;
+    if (s->y + s->h > DGM_H) s->y = DGM_H - s->h;
+    if (s->x < 0) s->x = 0;
+    if (s->y < 0) s->y = 0;
+    map[i] = g_doc->n;
+    g_doc->n++;
+    npasted++;
+  }
+  for (i = 0; i < g_nclip; i++) {
+    dgm_shape_t *s;
+    if (g_clip[i].kind != DGM_CONN || g_doc->n >= DGM_MAX_SHAPES) continue;
+    if (g_clip[i].from < 0 || g_clip[i].to < 0) continue;
+    if (map[g_clip[i].from] < 0 || map[g_clip[i].to] < 0) continue;
+    s = &g_doc->s[g_doc->n];
+    *s = g_clip[i];
+    s->from = map[g_clip[i].from];
+    s->to   = map[g_clip[i].to];
+    g_doc->n++;
+    npasted++;
+  }
+  if (!npasted) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "No room for another object"); return; }
+  sel_clear();
+  for (i = base; i < g_doc->n; i++) sel_add(i);
+  g_sel = base;
+  g_modified = 1;
+  scroll_to_sel();
+  snprintf(g_dgm_msg, sizeof g_dgm_msg,
+           "Pasted %d object%s at the cursor — arrows move them, C-y again for another copy",
+           npasted, npasted == 1 ? "" : "s");
+}
+
 /* Delete the whole selection in one pass.
  *
  * Calling dgm_delete once per marked object does not work: deleting a node
@@ -1348,6 +1448,26 @@ static void style_selection(int fg, int bg, int stroke)
 /* Join two objects, or explain why nothing happened. Two objects are either
    linked or not — asking for a link that already exists (in either direction)
    selects it instead of stacking an invisible second one on the same route. */
+/* Which edge a link let go over `target` should arrive at. Aiming at an edge
+   picks that edge; letting go somewhere in the middle means "just join these
+   two", and the router chooses the facing sides better than a nearest-edge
+   guess would — from the middle of a wide flat box every row is nearly touching
+   the top and bottom, so a guess there sends the arrow up over the roof. */
+static int drop_side(int target, int cx, int cy)
+{
+  const dgm_shape_t *s;
+  int fx, fy;
+  if (target < 0 || target >= g_doc->n) return DGM_SIDE_AUTO;
+  s = &g_doc->s[target];
+  fx = s->w >= 3 ? (cx - s->x) * 3 / s->w : 1;   /* 0 near the left, 2 the right */
+  fy = s->h >= 3 ? (cy - s->y) * 3 / s->h : 1;
+  if (fx == 0 && fy == 1) return DGM_SIDE_LEFT;
+  if (fx == 2 && fy == 1) return DGM_SIDE_RIGHT;
+  if (fy == 0) return DGM_SIDE_TOP;
+  if (fy == 2) return DGM_SIDE_BOTTOM;
+  return DGM_SIDE_AUTO;
+}
+
 static const char *side_name(int side)
 {
   switch (side) {
@@ -1783,8 +1903,7 @@ static int mouse_cb_inner(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     if (target >= 0 && target != g_drag_shape) {
       /* Where you let go picks the arriving edge, but only when the drag named
          a leaving edge too: a link made by clicking is still routed for you. */
-      int to_side = g_conn_from_side ? dgm_nearest_side(g_doc, target, cx, cy)
-                                     : DGM_SIDE_AUTO;
+      int to_side = g_conn_from_side ? drop_side(target, cx, cy) : DGM_SIDE_AUTO;
       link_objects_sides(g_drag_shape, target, g_conn_from_side, to_side);
       g_conn_from = -1;
       g_conn_from_side = DGM_SIDE_AUTO;
@@ -1917,10 +2036,30 @@ static int key_cb_inner(gtcaca_custom_widget_t *w, int key, void *ud)
       else g_dgm_msg[0] = '\0';
       return 1;
     }
-    snprintf(g_dgm_msg, sizeof g_dgm_msg, "C-x %c is undefined here — C-x q picks ASCII or Mermaid",
+    if (key == 0x17) {                           /* C-x C-w: cut, as C-w does in Emacs */
+      int n = copy_selection();
+      if (!n) {
+        snprintf(g_dgm_msg, sizeof g_dgm_msg, "Nothing selected to cut");
+        return 1;
+      }
+      delete_selection();
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "Cut %d object%s — C-y puts them back at the cursor",
+               n, n == 1 ? "" : "s");
+      return 1;
+    }
+    if (key == 'w' || key == 'W') {              /* C-x w: copy (M-w has no Meta here) */
+      int n = copy_selection();
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, n
+               ? "Copied %d object%s — C-y pastes them at the cursor"
+               : "Nothing selected to copy", n, n == 1 ? "" : "s");
+      return 1;
+    }
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "C-x %c is undefined here — C-x q format, C-x C-w cut, C-x w copy",
              key >= 32 && key < 127 ? key : '?');
     return 1;
   }
+  if (key == 0x19) { paste_clip(); return 1; }   /* C-y: yank */
   if (key == 0x18) {                             /* C-x: a prefix in here too */
     g_cx = 1;
     return 1;

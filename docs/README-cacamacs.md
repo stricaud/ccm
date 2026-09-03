@@ -424,6 +424,8 @@ Draw     f freehand (Space picks the character)   - a plain line, no arrows
 Style    C colour   B background   S solid / dashed / dotted
 Erase    e eraser: rub out single characters   x object → plain characters
 Group    m add the next object to the selection   A select all
+         G frame the selection (a group / Mermaid subgraph)
+Clip     C-x C-w cut   C-x w copy   C-y paste at the cursor
 Export   C-w write a copy to a file: .drawio, or .mmd for Mermaid
 Leaving  q insert at the cursor and leave — it asks for ASCII or Mermaid first
          Q leave the drawing behind          C-x q the same question as q
@@ -456,9 +458,14 @@ the same way, and the buffer is still saved with `C-x C-s`.
 ### Text on a link, and a second line in a label
 
 Press `Ret` on a selected link to type the text that rides on its arrow. It is
-drawn *beside* the line, never on it — written over the line it would break the
-run of characters in two and the recogniser would no longer see one link — and
-it becomes the edge label in the Mermaid output:
+drawn **in a gap in the middle of the line**, the way a line gets labelled by
+hand, and becomes the edge label in the Mermaid output:
+
+```
+┌──────┐                    ┌────────────┐
+│ Read │──────hourly───────>│ Documents  │
+└──────┘                    └────────────┘
+```
 
 ```
 n3 -->|"feeds"| n4
@@ -473,10 +480,38 @@ backslash followed by an n, type the backslash twice (`\\n`).
 A box grows to fit what you type into it, so a second line always has somewhere
 to go. It only ever grows: a box you sized by hand keeps that size.
 
-One limit: a link's text is written into the art as plain characters beside the
-line, so reopening the file reads it back as free text rather than as that
-link's label. The line and the words are both still there and nothing is lost;
-they are just no longer tied together.
+Text longer than the leg it labels is cut to fit rather than allowed to run on
+over the boxes at either end — a clipped word asks for more room; a caption
+written across a box is just a broken picture. Give the link a longer run and
+the whole label appears. A link that runs down the page is labelled the same
+way, in a gap in the vertical run.
+
+One limit, and a deliberate one: the text is written into the art as ordinary
+characters, so reopening the file reads it back as free text rather than as that
+link's label. Both the line and the words are still there and nothing is lost —
+they are simply no longer tied together. Diagram mode is built to write the best
+picture it can, and this is the price.
+
+### Cut, copy and paste
+
+| key | |
+| --- | --- |
+| `C-x C-w` | cut the selection |
+| `C-x w` | copy the selection |
+| `C-y` | paste at the cursor |
+
+The Emacs keys for these are `C-w`, `M-w` and `C-y`. `C-y` is itself; the other
+two sit under the `C-x` prefix here, because plain `C-w` already writes the
+diagram out to a file (which is `C-x C-w` in Emacs, so the two have in effect
+swapped places) and `M-w` needs a Meta prefix this mode does not have — Escape
+means "never mind" while you are drawing.
+
+What travels is the objects, not a picture of them. **A link comes along
+whenever both of its ends do**, whether or not you selected the link itself, so
+copying two joined boxes keeps the arrow between them; a link with only one end
+in the selection is left behind, there being nothing at its far end any more.
+The paste lands at the cursor and arrives selected, so the arrows can move it
+straight away, and `C-y` again drops another copy.
 
 ### Which side a link leaves by
 

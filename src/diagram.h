@@ -192,10 +192,10 @@ void dgm_render(const dgm_doc_t *d, dgm_grid_t *g);
    points into px/py and returns how many. Used by the renderer and by the mode
    to draw a live route while dragging. */
 int  dgm_route(const dgm_doc_t *d, int conn, int *px, int *py, int max);
-/* Where a link's own text sits: beside the middle of its longest straight leg.
-   `horiz` is non-zero when that leg runs across, in which case the text is
-   centred on (lx, ly) rather than starting there. 0 if there is no route. */
-int  conn_label_spot(const dgm_doc_t *d, int conn, int *lx, int *ly, int *horiz);
+/* Where a link's own text sits: in a gap in the middle of its longest straight
+   leg, centred on (lx, ly). `horiz` is non-zero when that leg runs across, and
+   `room` (may be NULL) is how many cells long it is. 0 if there is no route. */
+int  conn_label_spot(const dgm_doc_t *d, int conn, int *lx, int *ly, int *horiz, int *room);
 
 /* ── files ─────────────────────────────────────────────────────────────────── */
 /* Render to ASCII: trailing blanks trimmed, one '\n' per line, no trailing

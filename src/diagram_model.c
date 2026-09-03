@@ -1184,10 +1184,13 @@ static uint32_t arrow_glyph(int dx, int dy)
   return '^';
 }
 
-/* Where a link's text sits: beside the middle of its longest straight leg —
-   above a horizontal one, to the right of a vertical one. `horiz` says which,
-   since a label above a run is centred on it and one beside a run is not. */
-int conn_label_spot(const dgm_doc_t *d, int conn, int *lx, int *ly, int *horiz)
+/* Where a link's text sits: in a gap in the middle of its longest straight leg,
+   centred on (lx, ly) — the way a line is labelled by hand, `───feeds──▶`,
+   rather than by floating the words alongside it. `horiz` says whether that leg
+   runs across; `room` (optional) is how many cells long it is, which is what
+   decides whether the text fits in it without swallowing the elbows at either
+   end or the arrowhead. */
+int conn_label_spot(const dgm_doc_t *d, int conn, int *lx, int *ly, int *horiz, int *room)
 {
   int px[8], py[8], n, i, best = -1, blen = -1;
   n = dgm_route(d, conn, px, py, 8);
@@ -1199,14 +1202,9 @@ int conn_label_spot(const dgm_doc_t *d, int conn, int *lx, int *ly, int *horiz)
   }
   if (best < 0) return 0;
   *horiz = (py[best] == py[best + 1]);
-  if (*horiz) {
-    *lx = (px[best] + px[best + 1]) / 2;
-    *ly = py[best] - 1;                          /* just above the run */
-  } else {
-    *lx = px[best] + 1;                          /* just right of the run */
-    *ly = (py[best] + py[best + 1]) / 2;
-  }
-  if (*ly < 0) *ly = py[best] + 1;
+  *lx = (px[best] + px[best + 1]) / 2;
+  *ly = (py[best] + py[best + 1]) / 2;
+  if (room) *room = blen + 1;
   return 1;
 }
 
@@ -1248,21 +1246,30 @@ static void draw_conn(const dgm_doc_t *d, dgm_grid_t *g, int conn)
     int dy = (py[0] > py[1]) - (py[0] < py[1]);
     gput(g, px[0], py[0], arrow_glyph(dx, dy));
   }
-  /* The link's text goes *beside* its longest leg, never on it: written over
-     the line it would break the run of characters in two, and the recogniser
-     that reads the art back would no longer see one link. */
+  /* The link's text sits in the middle of its longest leg, in a gap in the run
+     itself — which is how a line gets labelled by hand. It costs the reader
+     that reads the art back the label (it comes home as free text beside a
+     line), and that is the trade the drawing is worth. */
   if (c->label[0]) {
-    int bx, by, horiz;
-    if (conn_label_spot(d, conn, &bx, &by, &horiz)) {
+    int bx, by, horiz, room;
+    if (conn_label_spot(d, conn, &bx, &by, &horiz, &room)) {
       char line[DGM_LABEL_MAX];
       const char *p = c->label;
-      int row = 0;
-      for (;;) {
+      int row;
+      /* A leg only has so many cells. Text longer than that is cut to fit
+         rather than allowed to run on over the boxes at either end: a clipped
+         word says "give me more room", a caption written across a box is just
+         a broken picture. A leg running down the page has the whole row, so
+         only the ones running across are cut. */
+      int fits = horiz ? room - 2 : DGM_W;
+      if (fits < 1) fits = 1;
+      p = label_line(p, line, sizeof line);
+      if (cp_count(line) > fits) clip_cells(line, fits);
+      gput_str(g, bx - cp_count(line) / 2, by, line);
+      for (row = 1; *p; row++) {                 /* further lines below it */
         p = label_line(p, line, sizeof line);
-        if (horiz) gput_str(g, bx - cp_count(line) / 2, by + row, line);
-        else       gput_str(g, bx, by + row, line);
-        row++;
-        if (!*p) break;
+        if (cp_count(line) > fits) clip_cells(line, fits);
+        gput_str(g, bx - cp_count(line) / 2, by + row, line);
       }
     }
   }
