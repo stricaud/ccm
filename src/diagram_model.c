@@ -1184,6 +1184,32 @@ static uint32_t arrow_glyph(int dx, int dy)
   return '^';
 }
 
+/* Where a link's text sits: beside the middle of its longest straight leg —
+   above a horizontal one, to the right of a vertical one. `horiz` says which,
+   since a label above a run is centred on it and one beside a run is not. */
+int conn_label_spot(const dgm_doc_t *d, int conn, int *lx, int *ly, int *horiz)
+{
+  int px[8], py[8], n, i, best = -1, blen = -1;
+  n = dgm_route(d, conn, px, py, 8);
+  if (n < 2) return 0;
+  for (i = 0; i + 1 < n; i++) {
+    int dx = px[i+1] - px[i], dy = py[i+1] - py[i];
+    int len = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+    if (len > blen) { blen = len; best = i; }
+  }
+  if (best < 0) return 0;
+  *horiz = (py[best] == py[best + 1]);
+  if (*horiz) {
+    *lx = (px[best] + px[best + 1]) / 2;
+    *ly = py[best] - 1;                          /* just above the run */
+  } else {
+    *lx = px[best] + 1;                          /* just right of the run */
+    *ly = (py[best] + py[best + 1]) / 2;
+  }
+  if (*ly < 0) *ly = py[best] + 1;
+  return 1;
+}
+
 static void draw_conn(const dgm_doc_t *d, dgm_grid_t *g, int conn)
 {
   int px[8], py[8], n, i, k;
@@ -1221,6 +1247,24 @@ static void draw_conn(const dgm_doc_t *d, dgm_grid_t *g, int conn)
     int dx = (px[0] > px[1]) - (px[0] < px[1]);
     int dy = (py[0] > py[1]) - (py[0] < py[1]);
     gput(g, px[0], py[0], arrow_glyph(dx, dy));
+  }
+  /* The link's text goes *beside* its longest leg, never on it: written over
+     the line it would break the run of characters in two, and the recogniser
+     that reads the art back would no longer see one link. */
+  if (c->label[0]) {
+    int bx, by, horiz;
+    if (conn_label_spot(d, conn, &bx, &by, &horiz)) {
+      char line[DGM_LABEL_MAX];
+      const char *p = c->label;
+      int row = 0;
+      for (;;) {
+        p = label_line(p, line, sizeof line);
+        if (horiz) gput_str(g, bx - cp_count(line) / 2, by + row, line);
+        else       gput_str(g, bx, by + row, line);
+        row++;
+        if (!*p) break;
+      }
+    }
   }
   pen_from(NULL);
 }
@@ -2022,11 +2066,12 @@ int dgm_export_drawio(const dgm_doc_t *d, const char *path, char *err, size_t er
     const dgm_shape_t *s = &d->s[i];
     if (s->kind != DGM_CONN) continue;
     drawio_style_extras(s, extras, sizeof extras, 1);
-    fprintf(f, "        <mxCell id=\"e%d\" style=\"edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;"
+    drawio_escape(s->label, label, sizeof label);
+    fprintf(f, "        <mxCell id=\"e%d\" value=\"%s\" style=\"edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;"
                "startArrow=%s;endArrow=%s;%s\" edge=\"1\" parent=\"1\" source=\"n%d\" target=\"n%d\">\n"
                "          <mxGeometry relative=\"1\" as=\"geometry\" />\n"
                "        </mxCell>\n",
-            i, s->arrow_from ? "classic" : "none", s->arrow_to ? "classic" : "none",
+            i, label, s->arrow_from ? "classic" : "none", s->arrow_to ? "classic" : "none",
             extras, s->from, s->to);
   }
 
@@ -2206,7 +2251,13 @@ int dgm_to_mermaid(const dgm_doc_t *d, char *out, size_t outsz)
     else
       arrow = s->arrow_from && s->arrow_to ? "<-->" : s->arrow_from ? "<--"
             : s->arrow_to ? "-->" : "---";
-    if (mermaid_put(out, outsz, &n, "  n%d %s n%d\n", s->from, arrow, s->to) != 0) return -1;
+    if (s->label[0]) {
+      char elabel[DGM_LABEL_MAX * 8];
+      mermaid_escape(s->label, elabel, sizeof elabel);
+      if (mermaid_put(out, outsz, &n, "  n%d %s|\"%s\"| n%d\n",
+                      s->from, arrow, elabel, s->to) != 0) return -1;
+    } else if (mermaid_put(out, outsz, &n, "  n%d %s n%d\n", s->from, arrow, s->to) != 0)
+      return -1;
     nedge++;
   }
 

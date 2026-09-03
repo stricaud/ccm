@@ -403,6 +403,7 @@ do the same job everywhere, which is why they exist alongside it.
 | --- | --- |
 | `m` | add the next object to the selection |
 | `G` | draw a frame around what is selected — a group |
+| `Ret` on a link | type the text that rides on its arrow |
 | `A` | select everything |
 | `Tab` | start again from a single object |
 | `C-g` | clear the selection |
@@ -451,6 +452,31 @@ still joining the right two. Open it at app.diagrams.net.
 
 It is a *copy*, not a substitute: `q` still drops the ASCII into your document
 the same way, and the buffer is still saved with `C-x C-s`.
+
+### Text on a link, and a second line in a label
+
+Press `Ret` on a selected link to type the text that rides on its arrow. It is
+drawn *beside* the line, never on it — written over the line it would break the
+run of characters in two and the recogniser would no longer see one link — and
+it becomes the edge label in the Mermaid output:
+
+```
+n3 -->|"feeds"| n4
+```
+
+To put a second line in any label, type `\n`. Shift-Enter would be the obvious
+key, but most terminals send the same byte for it as for Enter, so there is
+nothing to bind; `\n` is two ordinary characters that every terminal delivers,
+and the backslash goes away with it. `C-o` does the same. For a literal
+backslash followed by an n, type the backslash twice (`\\n`).
+
+A box grows to fit what you type into it, so a second line always has somewhere
+to go. It only ever grows: a box you sized by hand keeps that size.
+
+One limit: a link's text is written into the art as plain characters beside the
+line, so reopening the file reads it back as free text rather than as that
+link's label. The line and the words are both still there and nothing is lost;
+they are just no longer tied together.
 
 ### Which side a link leaves by
 

@@ -126,6 +126,7 @@ static int  g_drag_x0, g_drag_y0;               /* where the press landed (canva
 static int  g_drag_x1, g_drag_y1;               /* where the pointer is now  */
 
 static int  g_editing;                          /* typing a label */
+static int  g_edit_lit;                         /* the trailing \ is a literal one */
 static char g_edit_buf[DGM_LABEL_MAX];
 static int  g_edit_len;
 
@@ -440,6 +441,8 @@ static const char *const help_lines[] = {
   "            With several picked, moving, colouring, resizing, r, x, D and",
   "            Del act on all of them at once.",
   "",
+  "  Linking   Ret on a link types the text that rides on the arrow — it goes",
+  "            beside the line, and into the Mermaid output as its edge label.",
   "  Linking   click one object, then click the other (with Link armed) —",
   "            or drag from a selected object's  o  handle onto another —",
   "            or select one, press c, Tab to the other, press Enter.",
@@ -755,8 +758,12 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
   if (g_editing && g_sel >= 0 && g_sel < g_doc->n) {
     const dgm_shape_t *s = &g_doc->s[g_sel];
     int is_node = (s->kind == DGM_NODE);
+    int is_conn = (s->kind == DGM_CONN);
+    int cl_x = 0, cl_y = 0, cl_h = 0;
     int maxw = is_node ? s->w - 2 : view_w();
-    int ly = is_node ? s->y + s->h / 2 : s->y;
+    int ly;
+    if (is_conn && !conn_label_spot(g_doc, g_sel, &cl_x, &cl_y, &cl_h)) is_conn = 0;
+    ly = is_conn ? cl_y : is_node ? s->y + s->h / 2 : s->y;
     const char *shown = g_edit_buf;
     const char *nl = strrchr(g_edit_buf, '\n');
     int n, off = 0, lx;
@@ -766,8 +773,10 @@ static void draw_cb(gtcaca_custom_widget_t *w, void *ud)
     if (n > maxw - 1) off = n - (maxw - 1);      /* keep the caret in view */
     /* Centre it in the shape, the way it will be drawn once committed — typing
        into a box should look like the finished label, not like a field. */
-    lx = is_node ? s->x + 1 + (s->w - 2 - (n - off) - 1) / 2 : s->x;
-    if (lx < s->x + (is_node ? 1 : 0)) lx = s->x + (is_node ? 1 : 0);
+    lx = is_conn ? (cl_h ? cl_x - (n - off) / 2 : cl_x)
+       : is_node ? s->x + 1 + (s->w - 2 - (n - off) - 1) / 2 : s->x;
+    if (!is_conn && lx < s->x + (is_node ? 1 : 0)) lx = s->x + (is_node ? 1 : 0);
+    if (lx < 0) lx = 0;
     if (on_canvas(scr_x(lx), scr_y(ly))) {
       put_str_clipped(scr_x(lx), scr_y(ly), shown + off, maxw, CACA_BLACK, CACA_WHITE);
       put(scr_x(lx) + (n - off), scr_y(ly), '_', CACA_BLACK, CACA_WHITE);
@@ -912,8 +921,11 @@ static void dgm_status(void)
 
 static void begin_edit(int idx)
 {
-  if (idx < 0 || idx >= g_doc->n || g_doc->s[idx].kind == DGM_CONN) return;
+  /* A link takes text too — that is the label on the arrow — so the only thing
+     with nothing to type into is a plain line, which joins nothing. */
+  if (idx < 0 || idx >= g_doc->n || g_doc->s[idx].kind == DGM_LINE) return;
   sel_set(idx);
+  g_edit_lit = 0;
   strncpy(g_edit_buf, g_doc->s[idx].label, sizeof g_edit_buf - 1);
   g_edit_buf[sizeof g_edit_buf - 1] = '\0';
   g_edit_len = (int)strlen(g_edit_buf);
@@ -1581,8 +1593,8 @@ static int mouse_cb_inner(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
     int hit = dgm_hit(g_doc, cx, cy);
     g_drag = DRAG_NONE;
     if (hit < 0 || g_tool != TOOL_SELECT) return 1;
-    if (g_doc->s[hit].kind == DGM_CONN || g_doc->s[hit].kind == DGM_LINE) {
-      snprintf(g_dgm_msg, sizeof g_dgm_msg, "A line carries no text — put a label beside it (t)");
+    if (g_doc->s[hit].kind == DGM_LINE) {
+      snprintf(g_dgm_msg, sizeof g_dgm_msg, "A plain line carries no text — put a label beside it (t)");
       return 1;
     }
     sel_set(hit);
@@ -1776,11 +1788,23 @@ static int mouse_cb_inner(gtcaca_custom_widget_t *w, gtcaca_mouse_event_t ev,
       link_objects_sides(g_drag_shape, target, g_conn_from_side, to_side);
       g_conn_from = -1;
       g_conn_from_side = DGM_SIDE_AUTO;
-    } else if (was_click) {
-      /* Not a drag but a click on the source: stay armed and wait for the
-         second click, which is the easier gesture in a terminal. */
+    } else if (was_click && g_tool == TOOL_CONN) {
+      /* Not a drag but a click on the source, with Link deliberately chosen:
+         stay armed and wait for the second click, which is the easier gesture
+         in a terminal. */
       g_conn_from = g_drag_shape;
       snprintf(g_dgm_msg, sizeof g_dgm_msg, "Now click the object to link to  (C-g cancels)");
+    } else if (was_click) {
+      /* A click on a handle while merely selecting is a click on the object,
+         not the start of a link. Arming one here meant that clicking a box's
+         edge to pick it up quietly turned into "now choose the other end", and
+         the next press — often the handle you actually wanted to drag from —
+         was eaten as that answer, on the object itself. Nothing then happened
+         at all, which is exactly how it looked. */
+      g_conn_from = -1;
+      snprintf(g_dgm_msg, sizeof g_dgm_msg,
+               "Selected — drag from an o handle onto another object to link them"
+               " (or press l, then click both)");
     } else {
       g_conn_from = -1;
       snprintf(g_dgm_msg, sizeof g_dgm_msg,
@@ -1834,6 +1858,7 @@ static int typing_key(int key)
   case CACA_KEY_DELETE:
     while (*len > 0 && ((unsigned char)buf[*len - 1] & 0xc0) == 0x80) buf[--(*len)] = '\0';
     if (*len > 0) buf[--(*len)] = '\0';
+    g_edit_lit = 0;
     return 1;
   case 15:                                       /* C-o: a second label line */
     if (g_editing && (size_t)*len + 2 < cap) { buf[(*len)++] = '\n'; buf[*len] = '\0'; }
@@ -1848,6 +1873,20 @@ static int typing_key(int key)
       for (i = 0; i < n; i++) { buf[(*len)++] = utf[i]; buf[*len] = '\0'; }
     return 1;
   }
+  /* Typing a backslash then an n breaks the line. Shift-Enter would be the
+     obvious key, but most terminals send the same byte for it as for Enter, so
+     there is nothing to bind — this is two ordinary characters, which every
+     terminal delivers. The backslash goes away with it; to keep a literal one
+     followed by an n, type the backslash twice. */
+  if (key == 'n' && g_editing && *len > 0 && buf[*len - 1] == '\\' && !g_edit_lit) {
+    buf[*len - 1] = '\n';
+    return 1;
+  }
+  if (key == '\\' && g_editing && *len > 0 && buf[*len - 1] == '\\' && !g_edit_lit) {
+    g_edit_lit = 1;                              /* \\ is one literal backslash */
+    return 1;
+  }
+  g_edit_lit = 0;
   if (key >= 32 && key < 127 && (size_t)*len + 2 < cap) {
     buf[(*len)++] = (char)key;
     buf[*len] = '\0';
@@ -2046,7 +2085,7 @@ static int key_cb_inner(gtcaca_custom_widget_t *w, int key, void *ud)
       if (g_sel >= 0) begin_edit(g_sel);
       return 1;
     }
-    if (g_doc->s[g_sel].kind != DGM_CONN) begin_edit(g_sel);
+    begin_edit(g_sel);
     return 1;
   case CACA_KEY_INSERT: {                        /* same, but never edits a label */
     int dw, dh;
