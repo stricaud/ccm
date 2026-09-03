@@ -425,7 +425,7 @@ static const char *const help_lines[] = {
   "            click a link or a line      select it",
   "            double-click an object      type its label, centred in it",
   "            drag empty space            a band: everything it touches is",
-  "                                        selected (Shift keeps what was)",
+  "                                        selected",
   "            middle/right drag           pan       wheel  scroll",
   "",
   "  Several at once",
@@ -434,6 +434,8 @@ static const char *const help_lines[] = {
   "            keep it for their own text selection, so the band and m below",
   "            do the same job without it.",
   "            m adds the next object      A selects everything",
+  "            G draws a frame round them — a box enclosing others is a group,",
+  "              and becomes a subgraph in the Mermaid output",
   "            Tab starts again from one   C-g clears the selection",
   "            With several picked, moving, colouring, resizing, r, x, D and",
   "            Del act on all of them at once.",
@@ -454,7 +456,7 @@ static const char *const help_lines[] = {
   "  Keys      Tab      select the next object      Ret   edit its label",
   "            arrows   move the selection, or the cursor when nothing is picked",
   "            Ret      with nothing selected, places the armed shape at the cursor",
-  "            < >      narrower / wider            [ ]   shorter / taller",
+  "            < > or H L   narrower / wider     [ ] or K J   shorter / taller",
   "            r        change the shape            a     flip a link's arrows",
   "            Del / d  delete      D duplicate     u     undo",
   "            s        ASCII / Unicode line drawing",
@@ -1807,8 +1809,18 @@ static int typing_key(int key)
   size_t cap = g_editing ? sizeof g_edit_buf : sizeof g_prompt_buf;
 
   switch (key) {
-  case CACA_KEY_RETURN:
   case 10:
+    /* Line feed, not carriage return. A terminal that can tell Shift-Enter
+       apart from Enter sends this for it, which is exactly the "another line in
+       the same label" key to want; one that cannot sends 0x0d for both and this
+       never arrives, leaving C-o as the way in. (`ccm --diag` says which yours
+       does.) In a prompt a stray line feed means nothing, so it is dropped. */
+    if (g_editing) {
+      if ((size_t)*len + 2 < cap) { buf[(*len)++] = '\n'; buf[*len] = '\0'; }
+      return 1;
+    }
+    return 1;
+  case CACA_KEY_RETURN:
     if (g_editing) commit_edit(1);
     else { char tmp[PATH_MAX]; g_prompt = 0;
            snprintf(tmp, sizeof tmp, "%s", g_prompt_buf); export_file(tmp); }
@@ -1946,6 +1958,38 @@ static int key_cb_inner(gtcaca_custom_widget_t *w, int key, void *ud)
     snprintf(g_dgm_msg, sizeof g_dgm_msg,
              "%d object%s selected — m adds the next, Tab starts again from one", g_nmulti,
              g_nmulti == 1 ? "" : "s");
+    return 1;
+  }
+  case 'G': {                                    /* a frame round the selection */
+    int i, minx = DGM_W, miny = DGM_H, maxx = 0, maxy = 0, idx;
+    for (i = 0; i < g_doc->n; i++) {
+      const dgm_shape_t *s = &g_doc->s[i];
+      if (!g_multi[i] || s->kind == DGM_CONN) continue;
+      if (s->x < minx) minx = s->x;
+      if (s->y < miny) miny = s->y;
+      if (s->x + s->w > maxx) maxx = s->x + s->w;
+      if (s->y + s->h > maxy) maxy = s->y + s->h;
+    }
+    if (minx > maxx) {
+      snprintf(g_dgm_msg, sizeof g_dgm_msg,
+               "Select what to group first — drag a band round it, or m adds one at a time");
+      return 1;
+    }
+    /* Room for the frame's own border, a title row above its contents, and a
+       little air either side. Nothing marks this box as a group: enclosing the
+       others is what makes it one, here and when the art is read back. */
+    minx -= 2; maxx += 2; miny -= 2; maxy += 1;
+    if (minx < 0) minx = 0;
+    if (miny < 0) miny = 0;
+    undo_push();
+    idx = dgm_add_node(g_doc, DGM_RECT, minx, miny, maxx - minx, maxy - miny, "");
+    if (idx < 0) { snprintf(g_dgm_msg, sizeof g_dgm_msg, "No room for another object"); return 1; }
+    apply_new_style(idx);
+    sel_set(idx);
+    g_modified = 1;
+    begin_edit(idx);                             /* name it straight away */
+    snprintf(g_dgm_msg, sizeof g_dgm_msg,
+             "Type the group's name — it becomes a Mermaid subgraph");
     return 1;
   }
   case 'A': {                                    /* everything at once */
@@ -2099,10 +2143,14 @@ static int key_cb_inner(gtcaca_custom_widget_t *w, int key, void *ud)
              "q puts the diagram in the buffer — then C-x C-s saves the file as usual");
     return 1;
 
-  case '<': case ',': resize_selection(-1, 0); return 1;
-  case '>': case '.': resize_selection(1, 0);  return 1;
-  case '[':           resize_selection(0, -1); return 1;
-  case ']':           resize_selection(0, 1);  return 1;
+  /* Resizing from the keyboard. Shift+arrow would be the natural key for it,
+     but the ncurses driver swallows that sequence before anything downstream
+     can see it — no event arrives at all — so the shifted *letters* stand in
+     for the shifted arrows: H J K L are plain bytes every terminal delivers. */
+  case '<': case ',': case 'H': resize_selection(-1, 0); return 1;
+  case '>': case '.': case 'L': resize_selection(1, 0);  return 1;
+  case '[':           case 'K': resize_selection(0, -1); return 1;
+  case ']':           case 'J': resize_selection(0, 1);  return 1;
 
   case CACA_KEY_LEFT: case CACA_KEY_RIGHT: case CACA_KEY_UP: case CACA_KEY_DOWN: {
     int dx = (key == CACA_KEY_RIGHT) - (key == CACA_KEY_LEFT);

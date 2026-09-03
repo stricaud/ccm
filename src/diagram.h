@@ -14,8 +14,8 @@
  * The file on disk is that rendering and nothing else: plain ASCII (or the
  * box-drawing glyphs, if the diagram is in Unicode style), with no sidecar and
  * no embedded metadata. Reopening a file runs the art back through
- * dgm_parse_text(), which recognises each shape, its label and the lines
- * joining them, and rebuilds the objects. Whatever it cannot account for is kept
+ * dgm_parse_text(), which recognises each shape, its label, the shapes nested
+ * inside it and the lines joining them, and rebuilds the objects. Whatever it cannot account for is kept
  * verbatim in the `raw` layer, so a diagram drawn by hand — or by another tool
  * — never loses characters by passing through here.
  *
@@ -171,6 +171,18 @@ enum { DGM_HIT_NONE = 0, DGM_HIT_INSIDE, DGM_HIT_BORDER, DGM_HIT_CORNER };
 int dgm_hit_part(const dgm_doc_t *d, int idx, int x, int y);
 /* Bounding box of everything drawn, including the raw layer. */
 void dgm_extent(const dgm_doc_t *d, int *w, int *h);
+
+/* ── containers, a.k.a. subgraphs ───────────────────────────────────────────
+   A node whose rectangle encloses other objects is a frame around them rather
+   than a box in its own right. Nothing marks it as one: being drawn around
+   things is what makes it one, which is the only thing that could survive a
+   file that is nothing but the art. A container is not filled in (so what is
+   inside stays visible however the two were drawn), its label sits on its top
+   row instead of the middle, and the Mermaid export writes it as a subgraph. */
+int dgm_contains(const dgm_doc_t *d, int outer, int inner);
+int dgm_is_container(const dgm_doc_t *d, int idx);
+/* The innermost container holding `idx`, or -1 for something at the top level. */
+int dgm_parent(const dgm_doc_t *d, int idx);
 
 /* ── rendering ─────────────────────────────────────────────────────────────── */
 /* Paint the document into `g` (which the caller sizes and owns). Cells outside

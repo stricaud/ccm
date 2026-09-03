@@ -366,7 +366,7 @@ demand for whatever is selected.
 | click a link or a line | select it |
 | click an object while several are selected | go back to just that one |
 | Shift-click an object | add it to the selection, or take it back out |
-| drag empty space | a rubber band: everything it touches is selected (Shift keeps what was already picked) |
+| drag empty space | a rubber band: everything it touches is selected |
 | middle- or right-drag | pan the canvas |
 | wheel | scroll |
 
@@ -402,6 +402,7 @@ do the same job everywhere, which is why they exist alongside it.
 | key | |
 | --- | --- |
 | `m` | add the next object to the selection |
+| `G` | draw a frame around what is selected — a group |
 | `A` | select everything |
 | `Tab` | start again from a single object |
 | `C-g` | clear the selection |
@@ -416,7 +417,7 @@ Edit     Ret edit the label (C-o adds a line, Ret commits, C-g cancels)
          Del / d delete     D duplicate            u undo
          x turn the selection into plain characters (the eraser's raw material)
 Move     arrows move the selection — or the cursor, when nothing is selected
-Size     < > narrower / wider          [ ] shorter / taller
+Size     < > or H L narrower / wider   [ ] or K J shorter / taller
 Style    a cycle a link's arrowheads   s ASCII ↔ Unicode line drawing
 Draw     f freehand (Space picks the character)   - a plain line, no arrows
 Style    C colour   B background   S solid / dashed / dotted
@@ -472,6 +473,42 @@ out. Reopening reads those back as one link, and the picture can shift. Leave a
 little room between links running alongside each other and the round trip is
 exact.
 
+### Groups, and Mermaid subgraphs
+
+There is no group *object*. A box drawn around other boxes **is** the group —
+that is the only kind of grouping that can survive a file which is nothing but
+the art. Select what belongs together and press `G`, and a frame is drawn round
+it with room for a title, which you type straight away.
+
+A frame behaves differently from an ordinary box in the two ways it has to:
+it is never filled in, so what it encloses stays visible however the two were
+drawn; and its label sits on its top row rather than the middle, where its
+contents are. Frames nest.
+
+The Mermaid export writes each frame as a `subgraph`, so this:
+
+```
+┌─ one ────────────────────────────┐
+│ ┌────────────┐    ┌────────────┐ │
+│ │     a1     │───>│     a2     │ │
+│ └────────────┘    └────────────┘ │
+└──────────────────────────────────┘
+```
+
+comes out as:
+
+```
+graph LR
+  subgraph n3["one"]
+    n0["a1"]
+    n1["a2"]
+  end
+  n0 --> n1
+```
+
+Links that cross a frame's boundary are written normally, so a node in one
+subgraph can point at a node in another.
+
 ### ASCII art or a Mermaid graph
 
 `q` drops the diagram into the buffer. What it drops is your choice:
@@ -519,8 +556,9 @@ Two consequences worth knowing:
 - Dashed and dotted lines come back as loose characters rather than line
   objects: the recogniser looks for unbroken runs. They still draw and save
   exactly as they were; they just are not draggable until redrawn.
-- Shapes drawn inside other shapes are not recognised as nested; the inner one
-  is read as part of the outer one's label.
+- Shapes drawn inside other shapes come back nested, as the group they look
+  like: the outer one keeps its top row as its title and the inner ones are
+  read as shapes in their own right, links between them included.
 
 Opening a buffer that is bigger than the 512x256 canvas is declined rather than
 silently truncated, and leaving a diagram you did not change leaves the buffer

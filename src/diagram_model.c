@@ -325,6 +325,15 @@ void dgm_set_label(dgm_doc_t *d, int idx, const char *label)
     int lw, lh;
     label_extent(s->label, &lw, &lh);
     s->w = lw > 0 ? lw : 1; s->h = lh;
+  } else if (s->kind == DGM_NODE) {
+    /* Grow a box to hold what was typed into it — a second line of label in a
+       three-row box has nowhere to go, and typing one and seeing nothing appear
+       reads as the key not working. Only ever grow: a box someone sized by hand
+       keeps the size they gave it. */
+    int lw, lh;
+    label_extent(s->label, &lw, &lh);
+    if (lw + 2 > s->w) s->w = lw + 2;
+    if (lh + 2 > s->h) s->h = lh + 2;
   }
   fit_shape(s);          /* an actor's width follows its caption */
 }
@@ -543,6 +552,37 @@ int dgm_hit_part(const dgm_doc_t *d, int idx, int x, int y)
   }
 }
 
+int dgm_contains(const dgm_doc_t *d, int outer, int inner)
+{
+  const dgm_shape_t *o, *i;
+  if (outer == inner || outer < 0 || inner < 0 || outer >= d->n || inner >= d->n) return 0;
+  o = &d->s[outer]; i = &d->s[inner];
+  if (o->kind != DGM_NODE) return 0;
+  if (i->kind == DGM_CONN) return 0;
+  /* Strictly inside: the frame needs its own border, so a box exactly the size
+     of another is two boxes on top of each other, not one holding the other. */
+  return i->x > o->x && i->y > o->y &&
+         i->x + i->w < o->x + o->w && i->y + i->h < o->y + o->h;
+}
+
+int dgm_is_container(const dgm_doc_t *d, int idx)
+{
+  int i;
+  for (i = 0; i < d->n; i++) if (dgm_contains(d, idx, i)) return 1;
+  return 0;
+}
+
+int dgm_parent(const dgm_doc_t *d, int idx)
+{
+  int i, best = -1;
+  for (i = 0; i < d->n; i++) {
+    if (!dgm_contains(d, i, idx)) continue;
+    /* the innermost one wins, so nested frames nest */
+    if (best < 0 || (long)d->s[i].w * d->s[i].h < (long)d->s[best].w * d->s[best].h) best = i;
+  }
+  return best;
+}
+
 void dgm_extent(const dgm_doc_t *d, int *w, int *h)
 {
   int i, x, y, mw = 0, mh = 0;
@@ -687,8 +727,10 @@ static void clip_cells(char *line, int keep)
   *q = '\0';
 }
 
-/* Centre the label over the rows of `s` that can hold text. */
-static void draw_label(dgm_grid_t *g, const dgm_shape_t *s)
+/* Centre the label over the rows of `s` that can hold text — except on a frame,
+   where the middle is where its contents are, so the name goes on the top row
+   the way a subgraph is titled. */
+static void draw_label(dgm_grid_t *g, const dgm_shape_t *s, int frame)
 {
   int rows[DGM_H], nrows = 0, nlines = 0, i, row;
   const char *p;
@@ -710,7 +752,7 @@ static void draw_label(dgm_grid_t *g, const dgm_shape_t *s)
 
   for (p = s->label, i = 0; i < nlines; i++) {
     int l, r, lw;
-    row = rows[(nrows - nlines) / 2 + i];                /* vertically centred */
+    row = frame ? rows[i] : rows[(nrows - nlines) / 2 + i];
     p = label_line(p, line, sizeof line);
     label_span(s, row, &l, &r);
     lw = cp_count(line);
@@ -893,8 +935,9 @@ static void draw_line_obj(const dgm_doc_t *d, dgm_grid_t *g, const dgm_shape_t *
 
 static void draw_node(const dgm_doc_t *d, dgm_grid_t *g, const dgm_shape_t *s)
 {
+  int frame = dgm_is_container(d, (int)(s - d->s));
   pen_from(s);
-  clear_node(g, s);
+  if (!frame) clear_node(g, s);   /* a frame never blanks what it encloses */
   switch (s->shape) {
   case DGM_ELLIPSE:
   case DGM_CLOUD:    draw_ellipse(d, g, s); break;
@@ -904,7 +947,7 @@ static void draw_node(const dgm_doc_t *d, dgm_grid_t *g, const dgm_shape_t *s)
   case DGM_ACTOR:    draw_actor(g, s);      break;
   default:           draw_rect_like(d, g, s); break;
   }
-  draw_label(g, s);
+  draw_label(g, s, frame);
   pen_from(NULL);
 }
 
@@ -1412,7 +1455,8 @@ static void trim_trailing(char *s)
    writes into — so a diamond's tapered rows and an actor's caption come back
    the same way they went in. Lines are trimmed and blank top/bottom lines
    dropped, which is what makes save → open → save idempotent. */
-static void extract_label(const pgrid_t *p, const dgm_shape_t *node, char *out, size_t outsz)
+static void extract_label(const pgrid_t *p, const dgm_shape_t *node, char *out, size_t outsz,
+                          int top_row_only)
 {
   char rows[24][DGM_LABEL_MAX];
   size_t len = 0;
@@ -1423,9 +1467,11 @@ static void extract_label(const pgrid_t *p, const dgm_shape_t *node, char *out, 
     size_t rl = 0;
     int l, r, c, leading = 1;
     if (!label_span(node, row, &l, &r)) continue;
+    if (top_row_only && nrows > 0) break;   /* a frame is titled on its top row */
     rows[nrows][0] = '\0';
     for (c = l; c <= r; c++) {
       uint32_t ch = pget(p, c, row);
+      if (pused(p, c, row)) ch = ' ';    /* a shape nested here owns this cell */
       if (leading && ch == ' ') continue;
       leading = 0;
       str_append(rows[nrows], DGM_LABEL_MAX, &rl, ch);
@@ -1726,25 +1772,51 @@ int dgm_parse_text(dgm_doc_t *d, const char *text)
   }
   d->style = unicode ? DGM_STYLE_UNICODE : DGM_STYLE_ASCII;
 
-  /* 1. shapes — boxes, rounded boxes, cylinders, ellipses, hexagons,
-        diamonds and actors, each with the text inside it as its label */
-  for (y = 0; y < p.h; y++)
-    for (x = 0; x < p.w; x++) {
-      int shape, bx, by, bw, bh, r, c, idx;
-      dgm_shape_t probe;
+  /* 1. shapes — boxes, rounded boxes, cylinders, ellipses, hexagons, diamonds
+        and actors. A shape drawn inside another is a shape in its own right,
+        which is how a subgraph is drawn, so this claims only each outline and
+        leaves the insides for whatever is nested in them. */
+  {
+    int order[DGM_MAX_SHAPES], nb = 0, j;
+    for (y = 0; y < p.h; y++)
+      for (x = 0; x < p.w; x++) {
+        int shape, bx, by, bw, bh, r, c, idx;
+        if (pused(&p, x, y) || pget(&p, x, y) == ' ') continue;
+        if (!detect_node(&p, x, y, &shape, &bx, &by, &bw, &bh)) continue;
+        idx = dgm_add_node(d, shape, bx, by, bw, bh, "");
+        if (idx < 0) continue;
+        for (c = bx; c < bx + bw; c++) { puse(&p, c, by, idx); puse(&p, c, by + bh - 1, idx); }
+        for (r = by; r < by + bh; r++) { puse(&p, bx, r, idx); puse(&p, bx + bw - 1, r, idx); }
+        if (nb < DGM_MAX_SHAPES) order[nb++] = idx;
+        found++;
+      }
+
+    /* Then the labels, innermost shape first: whatever is left inside a shape
+       once the shapes nested in it have taken their own cells is its label. */
+    for (i = 0; i < nb; i++)
+      for (j = i + 1; j < nb; j++) {
+        const dgm_shape_t *a = &d->s[order[i]], *b = &d->s[order[j]];
+        if ((long)b->w * b->h < (long)a->w * a->h) {
+          int t = order[i]; order[i] = order[j]; order[j] = t;
+        }
+      }
+    for (i = 0; i < nb; i++) {
       char label[DGM_LABEL_MAX];
-      if (pused(&p, x, y) || pget(&p, x, y) == ' ') continue;
-      if (!detect_node(&p, x, y, &shape, &bx, &by, &bw, &bh)) continue;
-      memset(&probe, 0, sizeof probe);
-      probe.kind = DGM_NODE; probe.shape = shape;
-      probe.x = bx; probe.y = by; probe.w = bw; probe.h = bh;
-      extract_label(&p, &probe, label, sizeof label);
-      idx = dgm_add_node(d, shape, bx, by, bw, bh, label);
-      if (idx < 0) continue;
-      for (r = by; r < by + bh; r++)
-        for (c = bx; c < bx + bw; c++) puse(&p, c, r, idx);
-      found++;
+      int idx = order[i], r, c, frame = dgm_is_container(d, idx);
+      extract_label(&p, &d->s[idx], label, sizeof label, frame);
+      strncpy(d->s[idx].label, label, DGM_LABEL_MAX - 1);
+      d->s[idx].label[DGM_LABEL_MAX - 1] = '\0';
+      /* An ordinary shape swallows its whole inside — that inside is its label.
+         A frame keeps only its title row: the rest belongs to the shapes it
+         encloses and to the links running between them, which have still to be
+         recognised. Claiming it here is what used to eat those links. */
+      for (r = d->s[idx].y; r < d->s[idx].y + d->s[idx].h; r++) {
+        if (frame && r != d->s[idx].y && r != d->s[idx].y + 1) continue;
+        for (c = d->s[idx].x; c < d->s[idx].x + d->s[idx].w; c++)
+          if (!pused(&p, c, r)) puse(&p, c, r, idx);
+      }
     }
+  }
 
   /* 2. free text — a run needs a letter or digit, so "--->" stays a line */
   for (y = 0; y < p.h; y++)
@@ -2064,9 +2136,36 @@ int dgm_mermaid_dropped(const dgm_doc_t *d)
   return dropped;
 }
 
-int dgm_to_mermaid(const dgm_doc_t *d, char *out, size_t outsz)
+/* One level of the containment tree. A box drawn around others is written as a
+   Mermaid `subgraph … end` holding them, which is the same thing the drawing
+   says; anything else is a plain node. Recurses, so frames inside frames nest. */
+static int mermaid_emit_level(const dgm_doc_t *d, char *out, size_t outsz, size_t *n,
+                              int parent, int depth, int *ntext)
 {
   char label[DGM_LABEL_MAX * 8], shaped[DGM_LABEL_MAX * 8 + 32];
+  int i, indent = depth * 2;
+  if (depth > 12) return 0;               /* absurdly nested: stop rather than spin */
+  for (i = 0; i < d->n; i++) {
+    const dgm_shape_t *s = &d->s[i];
+    if (s->kind != DGM_NODE && s->kind != DGM_TEXT) continue;
+    if (dgm_parent(d, i) != parent) continue;
+    mermaid_escape(s->label, label, sizeof label);
+    if (dgm_is_container(d, i)) {
+      if (mermaid_put(out, outsz, n, "%*ssubgraph n%d[\"%s\"]\n", indent, "", i, label) != 0)
+        return -1;
+      if (mermaid_emit_level(d, out, outsz, n, i, depth + 1, ntext) != 0) return -1;
+      if (mermaid_put(out, outsz, n, "%*send\n", indent, "") != 0) return -1;
+      continue;
+    }
+    snprintf(shaped, sizeof shaped, mermaid_brackets(s->kind, s->shape), label);
+    if (mermaid_put(out, outsz, n, "%*sn%d%s\n", indent, "", i, shaped) != 0) return -1;
+    if (s->kind == DGM_TEXT) (*ntext)++;
+  }
+  return 0;
+}
+
+int dgm_to_mermaid(const dgm_doc_t *d, char *out, size_t outsz)
+{
   size_t n = 0;
   int i, across = 0, down = 0, nedge = 0, ntext = 0;
 
@@ -2093,14 +2192,7 @@ int dgm_to_mermaid(const dgm_doc_t *d, char *out, size_t outsz)
   if (mermaid_put(out, outsz, &n, "graph %s\n", across > down ? "LR" : "TD") != 0)
     return -1;
 
-  for (i = 0; i < d->n; i++) {            /* nodes and free text */
-    const dgm_shape_t *s = &d->s[i];
-    if (s->kind != DGM_NODE && s->kind != DGM_TEXT) continue;
-    mermaid_escape(s->label, label, sizeof label);
-    snprintf(shaped, sizeof shaped, mermaid_brackets(s->kind, s->shape), label);
-    if (mermaid_put(out, outsz, &n, "  n%d%s\n", i, shaped) != 0) return -1;
-    if (s->kind == DGM_TEXT) ntext++;
-  }
+  if (mermaid_emit_level(d, out, outsz, &n, -1, 1, &ntext) != 0) return -1;
 
   for (i = 0; i < d->n; i++) {            /* links, with their arrows and dashes */
     const dgm_shape_t *s = &d->s[i];
