@@ -189,6 +189,11 @@ void md_italic(gtcaca_editor_widget_t *ed);
 void md_strike(gtcaca_editor_widget_t *ed);
 void md_code(gtcaca_editor_widget_t *ed);
 void md_link(gtcaca_editor_widget_t *ed);
+void md_table(gtcaca_editor_widget_t *ed);         /* pandoc grid table */
+void md_github_table(gtcaca_editor_widget_t *ed);  /* GFM pipe table */
+void md_table_row(gtcaca_editor_widget_t *ed);
+void md_table_col(gtcaca_editor_widget_t *ed);
+void md_table_align(gtcaca_editor_widget_t *ed);
 void md_hr(gtcaca_editor_widget_t *ed);
 void copy_region(gtcaca_editor_widget_t *ed);
 const char *current_line_comment(void);
@@ -211,6 +216,8 @@ void pretty_print_json_line(gtcaca_editor_widget_t *ed);
 void pretty_print_xml_line(gtcaca_editor_widget_t *ed);
 void recenter(gtcaca_editor_widget_t *ed);
 void save_file(gtcaca_editor_widget_t *ed);
+/* C-x C-c: leave, but never silently on top of unsaved work. */
+void quit_cacamacs(void);
 void write_buffer_file(gtcaca_editor_widget_t *ed);   /* the write itself, no questions */
 void set_mark(gtcaca_editor_widget_t *ed);
 void set_rectangle_mark(gtcaca_editor_widget_t *ed);

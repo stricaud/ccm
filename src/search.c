@@ -298,7 +298,10 @@ static const char *g_mx_commands[] = { "help", "diagram", "undo", "redo",
                                        "md-bold", "md-italic", "md-code",
                                        "md-strike", "md-link",
                                        "md-list", "md-ordered", "md-task",
-                                       "md-quote", "md-hr", NULL };
+                                       "md-quote", "md-hr",
+                                       "md-table", "md-table-row",
+                                       "md-table-col", "md-table-align",
+                                       "md-github-table", NULL };
 
 void minibuffer_complete_command(void)
 {
@@ -654,11 +657,11 @@ void mx_done(const char *cmd)
   else if (!strcmp(cmd, "undo")) {
     gtcaca_editor_undo(g_ed);
     g_mark_active = 0;
-    snprintf(g_message, sizeof g_message, "Undo   (C-/ or C-x u does the same)");
+    snprintf(g_message, sizeof g_message, "Undo   (C-_ or C-x u does the same)");
   } else if (!strcmp(cmd, "redo")) {
     gtcaca_editor_redo(g_ed);
     g_mark_active = 0;
-    snprintf(g_message, sizeof g_message, "Redo   (C-x C-/ does the same)");
+    snprintf(g_message, sizeof g_message, "Redo   (C-x C-_ does the same)");
   }
   else if (!strcmp(cmd, "snake"))
     run_snake();
@@ -712,6 +715,11 @@ void mx_done(const char *cmd)
   else if (!strcmp(cmd, "md-task"))     md_task(g_ed);
   else if (!strcmp(cmd, "md-quote"))    md_quote(g_ed);
   else if (!strcmp(cmd, "md-hr"))       md_hr(g_ed);
+  else if (!strcmp(cmd, "md-table"))       md_table(g_ed);
+  else if (!strcmp(cmd, "md-github-table")) md_github_table(g_ed);
+  else if (!strcmp(cmd, "md-table-row"))   md_table_row(g_ed);
+  else if (!strcmp(cmd, "md-table-col"))   md_table_col(g_ed);
+  else if (!strcmp(cmd, "md-table-align")) md_table_align(g_ed);
   else if (cmd[0])
     snprintf(g_message, sizeof g_message, "No command: %s  (try: help, diagram, md-title, undo)", cmd);
 }

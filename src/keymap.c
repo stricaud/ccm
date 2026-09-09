@@ -7,7 +7,7 @@
 
  /* A pasted block, handed over whole by the toolkit rather than as thousands of
    keystrokes. Inserting it in one go is the difference between a paste that is
-   instant and one that is quadratic — and it means C-/ undoes the paste as a
+   instant and one that is quadratic — and it means C-_ undoes the paste as a
    single edit. Prompts and searches still take it a character at a time; they
    are tiny, and they need their own handling. */
 void ccm_paste(const char *text, int len, void *ud)
@@ -217,10 +217,10 @@ int on_key(gtcaca_editor_widget_t *ed, int key, void *ud)
     case KEY_CTRL_S:        save_file(ed);                return 1;  /* C-x C-s */
     case CACA_KEY_CTRL_W:   start_save_as();              return 1;  /* C-x C-w write-file */
     case CACA_KEY_CTRL_F:   start_find_file();            return 1;  /* C-x C-f */
-    case CACA_KEY_CTRL_C:   gtcaca_main_quit();           return 1;  /* C-x C-c */
+    case CACA_KEY_CTRL_C:   quit_cacamacs();              return 1;  /* C-x C-c */
     case CACA_KEY_CTRL_X:   exchange_point_and_mark(ed);  return 1;  /* C-x C-x */
     case 'u':               gtcaca_editor_undo(ed); g_mark_active = 0; return 1; /* C-x u */
-    case KEY_UNDO:          gtcaca_editor_redo(ed); g_mark_active = 0; return 1; /* C-x C-/ redo */
+    case KEY_UNDO:          gtcaca_editor_redo(ed); g_mark_active = 0; return 1; /* C-x C-_ redo */
     case 'l':               toggle_line_numbers(ed);      return 1;  /* C-x l */
     case 'f':               toggle_folding(ed);           return 1;  /* C-x f */
     case 't':               toggle_fold_here(ed);         return 1;  /* C-x t */

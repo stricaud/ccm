@@ -153,11 +153,18 @@ const char *help_text(void)
   "         md-h1 … md-h6  # headings    md-hr  horizontal rule\n"
   "         md-bold  md-italic  md-code  md-strike  md-link\n"
   "         md-list  md-ordered  md-task  md-quote\n"
+  "         md-table  a two-column pandoc grid table; the region becomes\n"
+  "         the left cell, keeping its line breaks (a graph, a diagram)\n"
+  "         with nothing selected it takes the ``` block point is in, so\n"
+  "         M-x diagram then M-x md-table needs no selecting in between\n"
+  "         md-github-table  the GFM pipe form — GitHub draws it, pandoc\n"
+  "         drops the <br> fold it needs\n"
+  "         md-table-row  md-table-col  md-table-align  (either shape)\n"
   "Diagram  M-x diagram  draw an ASCII diagram and drop it in at the cursor\n"
   "         (select existing art first to edit it; q inserts, then C-x C-s)\n"
   "         shapes, links, an eraser — ? inside the mode lists every key\n"
-  "Undo     C-/   (also C-x u, or M-x undo)   Redo   C-x C-/  (or M-x redo)\n"
-  "Paste    the terminal's paste goes in as one edit — C-/ takes it back whole\n"
+  "Undo     C-_   (also C-/, C-x u, M-x undo)  Redo   C-x C-_  (or M-x redo)\n"
+  "Paste    the terminal's paste goes in as one edit — C-_ takes it back whole\n"
   "Help     M-x help\n";
 }
 

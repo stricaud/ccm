@@ -47,11 +47,11 @@ Repeat   C-u N <command> runs the next command N times (bare C-u = 4):
          C-u 40 - draws 40 dashes, C-u 5 C-f moves five chars, …
 Meta     Esc is the Meta prefix — press Esc, then a key, for M-<key>
          (Alt+<key> works too on terminals that send it as Esc-prefixed)
-Undo     C-/   (also C-x u, or M-x undo)   Redo  C-x C-/  (or M-x redo)
+Undo     C-_   (also C-/, C-x u, M-x undo)  Redo  C-x C-_  (or M-x redo)
 Files    C-x C-f find file (Tab completes; a directory opens the browser)
          C-x C-s save (opens the save dialog if the buffer has no name)
          C-x C-w write to a different file (save dialog)
-         C-x C-c quit   C-x d browser
+         C-x C-c quit (asks first if anything is unsaved)   C-x d browser
          (save dialog: type the name, Enter saves via the default OK button;
           Tab to the buttons, Cancel or C-g aborts)
          M-x revert-buffer  throw the buffer away for the file on disk
@@ -79,6 +79,10 @@ and the markup comes back off.
 | `md-list` / `md-ordered` / `md-task` | prefix the lines with `- `, `1. `, `- [ ] ` |
 | `md-quote` | prefix the lines with `> ` |
 | `md-hr` | a `---` rule on a line of its own |
+| `md-table` | a two-column pandoc grid table; the region becomes the left cell |
+| `md-github-table` | the same thing in GitHub's pipe syntax |
+| `md-table-row` / `md-table-col` | grow the table at point, either shape |
+| `md-table-align` | redraw it so the walls line up |
 
 So for the common case: type your title, then `M-x md-title`:
 
@@ -93,6 +97,134 @@ is what lets `md-title` and `md-subtitle` change a heading's level.
 
 `md-ordered` renumbers the whole range from 1, so it also fixes a list whose
 numbering has drifted.
+
+### Tables
+
+`M-x md-table` makes the two-column shape you usually want — something on the
+left, what it means on the right. Whatever is selected becomes the left cell of
+the first body row and point lands in the header above it, ready for the column
+name; a blank line goes either side, because a table that carries straight on
+from the paragraph above it is read as more of that paragraph and never drawn.
+
+It writes a **pandoc grid table**, because a grid cell is a *block*:
+
+```
++---------------------------------+-----+
+| Graph                           |     |
++=================================+=====+
+| ```mermaid                      |     |
+| graph LR                        |     |
+|   n0["Client"] --> n1{"Auth?"}  |     |
+|   n1 -->|"yes"| n2[["Service"]] |     |
+| ```                             |     |
++---------------------------------+-----+
+```
+
+That is the whole reason for the shape. A GitHub pipe table is one line per
+row, so a selection spanning several lines has to be folded onto one with
+`<br>` — and `<br>` is raw HTML, which pandoc's LaTeX writer drops, so the cell
+arrives at the PDF empty. In the grid the selection goes in line for line and
+comes out of pandoc as a real verbatim block.
+
+`M-x md-github-table` writes the pipe form instead, folded that way on purpose,
+for a document GitHub is going to render:
+
+```
+|  |  |
+| --- | --- |
+| <pre>graph LR<br>  n0["Client"] --&gt; n1{"Auth?"}</pre> |  |
+```
+
+Pick by where the file is going. GitHub does not read grid tables; pandoc
+throws away the fold that GitHub needs. There is no form that does both.
+
+#### Straight from diagram mode
+
+This is the run it was built for. Draw the thing, press `q` and take the
+Mermaid answer, and the graph lands in the buffer as a ```` ```mermaid ````
+block with point just past it. `M-x md-table` with **nothing selected** takes
+the fenced block point is standing in — so there is no selecting to do:
+
+```
+M-x diagram   draw two boxes, l links them, q → mermaid
+M-x md-table  → the graph is the left cell, point is in the header
+Graph         name the column
+M-x md-table-align
+```
+
+```
++----------------+-----+
+| Graph          |     |
++================+=====+
+| ```mermaid     |     |
+| graph LR       |     |
+|   n0["Client"] |     |
+|   n1["Auth"]   |     |
+|   n1 --> n0    |     |
+| ```            |     |
++----------------+-----+
+```
+
+and the right-hand column is yours to write in. Select something first and that
+is used instead, fence or no fence; away from any fence with nothing selected
+you get the empty two-column skeleton.
+
+#### Fencing
+
+A multi-line selection is fenced on the way into a grid cell if it needs to be,
+because pandoc runs unfenced lines together into one paragraph and a graph or a
+drawing loses its shape the moment that happens. A fence the selection already
+has is kept — it also names the language. Prose, which wants to be a paragraph,
+is left alone.
+
+#### Growing and redrawing
+
+`md-table-row` adds an empty row below the one point is on (from the header or
+a rule it adds the *first* body row, which is what you meant), `md-table-col`
+adds a column to every row, and `md-table-align` redraws the table so the walls
+stand in a column. All three read whichever shape point is in, so there is only
+one set to remember:
+
+```
+| Step | What it does |     | Step  | What it does |
+| --- | --- |             -> | ----- | ------------ |
+| one | first |              | one   | first        |
+```
+
+Alignment colons (`:--`, `--:`, `+:---+`) survive the redraw. In a pipe table a
+column wider than 48 characters is left unpadded — one folded diagram would
+otherwise push every other row out to its width. A grid table has no such
+problem, since the fold never happens there.
+
+`md-table-align` splits a grid row on the columns its own rule sets, the way
+pandoc does, rather than on every `|` it can see. That is what lets a cell hold
+an ASCII drawing: the walls of a box are `|` characters with spaces round them
+and nothing local tells them apart from cell walls. A row you have typed out of
+alignment no longer matches its rule, and falls back to reading a `|` as a wall
+at the line's edges or after a space — right for everything but art that has
+been pushed askew, and `md-table-align` puts it back.
+
+#### Will it be *drawn*?
+
+That depends on what reads the file, and the two shapes part company here too.
+
+**GitHub** draws Mermaid from a ```` ```mermaid ```` fence, and there is no
+fence inside a pipe cell — so in `md-github-table` a graph stays source, and
+nothing can change that. Put the ASCII output in the cell instead (`C-x q` in
+diagram mode switches between the two): that is text, so it survives the fold
+and renders as the drawing itself.
+
+**Pandoc** does not draw Mermaid at all; a pipeline renders the fence to an
+image before pandoc runs. Whether that happens inside a table is a question
+about the renderer, not about the table: one that matches ```` ^```mermaid ````
+at the start of a line will not see `| ```mermaid    |` in a cell, and the cell
+arrives at the PDF as source. A renderer that takes the grid apart along its
+own rule first will find it, draw it, and put the image back in the cell — the
+`md2pdf` project's `scripts/render-mermaid.sh` does exactly that, and the graph
+comes out as a picture in the left column with your notes beside it.
+
+So: the grid shape can carry a drawn graph through pandoc, given a renderer
+that looks inside it. The pipe shape cannot carry one through anything.
 
 ## When the file changes on disk
 
@@ -259,7 +391,7 @@ A diagram is a piece of a document, not a document of its own:
   `q` puts the redrawn art in its place.
 
 Then save the way you always do: `C-x C-s`. The mode never writes a file itself,
-and `C-/` undoes the insertion like any other edit. `Q` leaves the drawing
+and `C-_` undoes the insertion like any other edit. `Q` leaves the drawing
 behind and touches nothing.
 
 ### The shape pane
@@ -429,7 +561,7 @@ Clip     C-x C-w cut   C-x w copy   C-y paste at the cursor
 Export   C-w write a copy to a file: .drawio, or .mmd for Mermaid
 Leaving  q insert at the cursor and leave — it asks for ASCII or Mermaid first
          Q leave the drawing behind          C-x q the same question as q
-         (then C-x C-s saves the buffer, C-/ undoes the insert)   ? help
+         (then C-x C-s saves the buffer, C-_ undoes the insert)   ? help
 ```
 
 ### Line drawing

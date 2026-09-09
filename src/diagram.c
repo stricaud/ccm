@@ -476,7 +476,7 @@ static const char *const help_lines[] = {
   "            s        ASCII / Unicode line drawing",
   "            q insert the diagram at the cursor and leave — it asks whether",
   "              to insert the ASCII art or a Mermaid graph first (C-x C-s",
-  "              then saves the file, C-/ undoes the insert)",
+  "              then saves the file, C-_ undoes the insert)",
   "              Q leaves the drawing behind   C-x q is the same question",
   "            C-g cancel   ? this help",
   "",
@@ -1060,11 +1060,11 @@ static void close_diagram(int keep)
   undo_clear();
   if (inserted && g_out == OUT_MERMAID)
     snprintf(g_message, sizeof g_message,
-             "Mermaid graph inserted%s — C-x C-s saves the file, C-/ undoes the insert",
+             "Mermaid graph inserted%s — C-x C-s saves the file, C-_ undoes the insert",
              dropped ? " (free lines and loose characters do not travel — C-x q for ASCII)" : "");
   else
     snprintf(g_message, sizeof g_message,
-             inserted ? "Diagram inserted — C-x C-s saves the file, C-/ undoes the insert"
+             inserted ? "Diagram inserted — C-x C-s saves the file, C-_ undoes the insert"
                       : g_modified ? "Left the diagram behind (nothing inserted)"
                                    : "Left diagram mode");
   pane_show_all();

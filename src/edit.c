@@ -1,3 +1,5 @@
+#include <gtcaca/dialog.h>
+
 #include "cacamacs.h"
 /* ── kill ring (single register) ───────────────────────────────────────────── */
 
@@ -684,6 +686,52 @@ void write_buffer_file(gtcaca_editor_widget_t *ed)
     if (bi >= 0 && !g_buffers[bi].has_file) ccm_stamp_buffer(bi); }
   ccm_log_file('W', path);
   snprintf(g_message, sizeof(g_message), "Wrote %s", path);
+}
+
+/* ── leaving ────────────────────────────────────────────────────────────────
+ * C-x C-c used to go straight out, taking any unsaved work with it. Anything
+ * still modified now has to be acknowledged first: the dialog's default button
+ * is the one that keeps your edits, and Escape keeps them too, so the only way
+ * to lose them is to say so.
+ *
+ * A split view shares its document with the buffer it was split from, so those
+ * are skipped — one document, one question. */
+static int unsaved_count(int *first)
+{
+  int i, n = 0;
+  if (first) *first = -1;
+  for (i = 0; i < g_nbuf; i++) {
+    if (!g_buffers[i].ed || g_buffers[i].is_view) continue;
+    if (!gtcaca_editor_get_modify(g_buffers[i].ed)) continue;
+    if (n == 0 && first) *first = i;
+    n++;
+  }
+  return n;
+}
+
+void quit_cacamacs(void)
+{
+  static const char *buttons[2] = { "Cancel", "Leave without saving" };
+  char msg[PATH_MAX + 80];
+  int first = -1, n = unsaved_count(&first);
+
+  if (n == 0) { gtcaca_main_quit(); return; }
+  if (n == 1) {
+    const char *base = g_buffers[first].has_file ? g_buffers[first].path : "*scratch*";
+    const char *slash = strrchr(base, '/');
+    snprintf(msg, sizeof msg, "%s has unsaved changes. Leave anyway?",
+             slash ? slash + 1 : base);
+  } else {
+    snprintf(msg, sizeof msg, "%d buffers have unsaved changes. Leave anyway?", n);
+  }
+  if (gtcaca_dialog_run("Quit cacamacs", msg, buttons, 2) == 1) {
+    gtcaca_main_quit();
+    return;
+  }
+  gtcaca_redraw();
+  snprintf(g_message, sizeof g_message,
+           n == 1 ? "Still here — C-x C-s saves the buffer"
+                  : "Still here — C-x C-s saves each buffer, C-x b switches between them");
 }
 
 void save_file(gtcaca_editor_widget_t *ed)

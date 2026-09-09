@@ -25,8 +25,9 @@
  *   Search : C-s incremental search forward, C-r backward (Enter accepts,
  *            C-g cancels); M-% (Esc %) or C-x r replace-all
  *   Meta   : Esc acts as the Meta prefix (Esc then a key = M-key)
- *   Undo   : C-/  (also  C-x u)
- *   Files  : C-x C-s save      C-x C-c quit       C-x C-x exchange point/mark
+ *   Undo   : C-_  (also C-/ and C-x u — a terminal sends the same key for both)
+ *   Files  : C-x C-s save      C-x C-c quit (asks if anything is unsaved)
+ *             C-x C-x exchange point/mark
  *   Complete: Tab — complete the word before the caret (else insert a soft tab).
  *             In the list: Up/Down choose, Enter/Tab accept, Esc cancel.
  *   View   : C-x l line numbers   C-x f folding mode   C-x t toggle fold
