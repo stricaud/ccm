@@ -1,4 +1,5 @@
 #include "cacamacs.h"
+#include <gtcaca/dialog.h>
 
 /* ── GnuPG-encrypted files ────────────────────────────────────────────────────
  *
@@ -281,18 +282,30 @@ char *ccm_gpg_decrypt(const char *path, const char *pass, size_t *outlen,
   return out ? out : calloc(1, 1);
 }
 
-/* Encrypt `data` to `key` and write the result over `path`.
+/* Encrypt `data` and write the result over `path`.
+ *
+ * Two ways, and which one is in use is decided by whether there is a key:
+ * to a public key (`--recipient`), or to a passphrase the user chose
+ * (`--symmetric`), which needs no keyring at all.
  *
  * gpg writes the file itself (`--output`), so the plain text goes down a pipe
  * and only ciphertext is ever handed to the filesystem. */
-int ccm_gpg_encrypt(const char *path, const char *key, const char *data, size_t len,
-                    char *err, size_t errsz)
+int ccm_gpg_encrypt(const char *path, const char *key, const char *pass,
+                    const char *data, size_t len, char *err, size_t errsz)
 {
-  const char *argv[] = {
+  const char *to_key[] = {
     g_cfg_gpg, "--batch", "--yes", "--quiet", "--no-tty",
     "--output", path, "--recipient", key, "--encrypt", NULL
   };
-  return gpg_run(argv, NULL, data, len, NULL, NULL, err, errsz) == 0 ? 0 : -1;
+  const char *to_pass[] = {
+    g_cfg_gpg, "--batch", "--yes", "--quiet", "--no-tty",
+    "--pinentry-mode", "loopback", "--passphrase-fd", "3",
+    "--output", path, "--symmetric", NULL
+  };
+  if (key && *key)
+    return gpg_run(to_key, NULL, data, len, NULL, NULL, err, errsz) == 0 ? 0 : -1;
+  if (!pass || !*pass) { snprintf(err, errsz, "no key and no passphrase"); return -1; }
+  return gpg_run(to_pass, pass, data, len, NULL, NULL, err, errsz) == 0 ? 0 : -1;
 }
 
 /* Who is `path` encrypted to? Read off the file rather than remembered, so a
@@ -344,13 +357,19 @@ int ccm_gpg_recipient(const char *path, char *out, size_t outsz)
 
 #define CRYPT_TRIES 3                    /* wrong passphrases before giving up */
 
+/* Which question crypt_choose_passphrase is asking — the three read very
+   differently to someone who has just watched a file open. */
+enum { CRYPT_ASK_NEW_FILE, CRYPT_ASK_EXISTING, CRYPT_ASK_CHANGE };
+
 static int g_crypt_buf   = -1;           /* buffer the open question belongs to */
-static int g_crypt_askey = 0;            /* -k: ask for the recipient after unlocking */
-static int g_crypt_tries = 0;
+static int g_crypt_askey = 0;            /* -k: ask how to encrypt, after unlocking */
 
 static void crypt_ask_pass(const char *lead);
 static void crypt_ask_key(void);
+static void crypt_ask_setup(void);
+static void crypt_say_how(buffer_t *b);
 static int  crypt_unlock(const char *pass, int *fatal);
+static int  crypt_choose_passphrase(const char *name, int how, char *out, size_t outsz);
 
 /* Mark `bi` as holding an encrypted file that has not been decrypted yet. */
 void ccm_crypt_lock(int bi)
@@ -361,6 +380,19 @@ void ccm_crypt_lock(int bi)
   gtcaca_editor_set_text(b->ed, "");
   gtcaca_editor_set_read_only(b->ed, 1);
   ccm_gpg_recipient(b->path, b->crypt_key, sizeof b->crypt_key);
+}
+
+/* The last word on what happened has to reach the modeline itself.
+ *
+ * g_message is only *read* when the modeline is rebuilt, and the rebuild that
+ * matters here already happened — gtcaca_editor_set_text() fires it while the
+ * buffer is being filled, before there is anything to report. Without this the
+ * echo line keeps whatever was there when the file was opened, which is how a
+ * file that decrypted perfectly came to sit under a stale complaint about
+ * syntax colouring. */
+static void crypt_flush_message(void)
+{
+  if (g_ed) refresh_modeline(g_ed, NULL);
 }
 
 /* Start the questions for buffer `bi`. `key` is what -k was given, "" if -k was
@@ -380,19 +412,65 @@ void ccm_crypt_begin(int bi, const char *key)
 
   g_crypt_buf   = bi;
   g_crypt_askey = (key && !*key);
-  g_crypt_tries = 0;
 
   if (b->locked) {
     /* Ask gpg-agent first. If it is already holding the key unlocked — you
        decrypted something a minute ago — there is nothing to ask for, and a
        prompt whose answer is not checked is worse than no prompt at all. */
     if (crypt_unlock(NULL, NULL) != 0) crypt_ask_pass(NULL);
+    crypt_flush_message();
     return;
   }
-  if (g_crypt_askey) { crypt_ask_key(); return; }
-  if (b->crypt)
+  if (g_crypt_askey) { crypt_ask_setup(); crypt_flush_message(); return; }
+  if (b->crypt) { crypt_say_how(b); crypt_flush_message(); }
+}
+
+/* What this buffer will do on the next save, in one line. */
+static void crypt_say_how(buffer_t *b)
+{
+  if (b->crypt_key[0])
     snprintf(g_message, sizeof g_message,
              "Encrypted to %s — C-x C-s writes it back encrypted", b->crypt_key);
+  else if (b->crypt_pass[0])
+    snprintf(g_message, sizeof g_message,
+             "Encrypted with your passphrase — C-x C-s writes it back encrypted");
+  else
+    snprintf(g_message, sizeof g_message,
+             "Nothing to encrypt with yet — M-x set-encryption-key asks");
+}
+
+/* -k with no key named. A file already encrypted to somebody's public key is
+   asked about as a key, since that is what it has; anything else — a new file,
+   a plain one, one already encrypted to a passphrase — is asked for a
+   passphrase, which needs no keyring at all. */
+static void crypt_ask_setup(void)
+{
+  buffer_t *b = &g_buffers[g_crypt_buf];
+  struct stat st;
+  char pass[256];
+  int how;
+
+  g_crypt_askey = 0;
+  if (b->crypt_key[0]) { crypt_ask_key(); return; }
+
+  /* Three things to say, and they are not interchangeable: a file that does not
+     exist, one that is about to start being encrypted, and one that already is
+     and is having its passphrase changed. */
+  how = b->crypt_pass[0] ? CRYPT_ASK_CHANGE
+      : stat(b->path, &st) != 0 ? CRYPT_ASK_NEW_FILE
+      : CRYPT_ASK_EXISTING;
+
+  if (!crypt_choose_passphrase(ccm_base_name(b->path), how, pass, sizeof pass)) {
+    if (b->crypt_pass[0]) crypt_say_how(b);
+    else snprintf(g_message, sizeof g_message,
+                  "No passphrase — %s is left as it is  (M-x set-encryption-key asks again)",
+                  ccm_base_name(b->path));
+    return;
+  }
+  snprintf(b->crypt_pass, sizeof b->crypt_pass, "%s", pass);
+  ccm_wipe(pass, sizeof pass);
+  b->crypt = 1;
+  crypt_say_how(b);
 }
 
 /* ── the passphrase ──────────────────────────────────────────────────────── */
@@ -420,52 +498,70 @@ static int crypt_unlock(const char *pass, int *fatal)
   gtcaca_editor_goto_pos(b->ed, 0);
   b->locked = 0;
   ccm_stamp_buffer(g_crypt_buf);
+  /* A file encrypted to a public key can be written back with the public half
+     alone, so nothing has to be kept. One encrypted to a passphrase cannot:
+     saving it means encrypting it again, and the passphrase is the only way.
+     So it is held for the session — and only for the session. */
+  if (!b->crypt_key[0] && pass) snprintf(b->crypt_pass, sizeof b->crypt_pass, "%s", pass);
 
-  if (g_crypt_askey) { crypt_ask_key(); return 0; }
+  /* -k on a file that was already encrypted has nothing to set up: it has just
+     been opened, so both what it is encrypted with and how to write it back are
+     known. Asking anyway is what made opening one look like it had gone wrong —
+     the text was on screen and a box was still standing there wanting a key,
+     for a file that has no key at all. Changing either is M-x
+     set-encryption-key, which is a different question asked on purpose. */
+  g_crypt_askey = 0;
   if (b->crypt_key[0])
     snprintf(g_message, sizeof g_message,
-             "Decrypted — saves go back encrypted to %s", b->crypt_key);
+             "Decrypted — C-x C-s writes it back encrypted to %s", b->crypt_key);
   else
     snprintf(g_message, sizeof g_message,
-             "Decrypted — M-x set-encryption-key names who to save it back to");
+             "Decrypted — C-x C-s writes it back with the same passphrase"
+             "  (M-x set-encryption-key changes it)");
   return 0;
 }
 
-static void crypt_pass_done(const char *pass)
-{
-  int fatal = 0, ok;
-  char why[256];
-
-  if (g_crypt_buf < 0 || g_crypt_buf >= g_nbuf) return;
-
-  ok = crypt_unlock(pass, &fatal) == 0;
-  ccm_wipe((void *)pass, strlen(pass));    /* the copy the minibuffer handed us */
-  if (ok) return;
-
-  snprintf(why, sizeof why, "%s", g_message);
-  /* Nearly always a typo, so ask again rather than making the user find the
-     command to retry — but not forever, and not at all when gpg itself is what
-     is wrong, where the answer would never change however often it is asked. */
-  if (!fatal && ++g_crypt_tries < CRYPT_TRIES) { crypt_ask_pass(why); return; }
-  /* The state first, the reason after it: the echo line shares its row with
-     the modeline and the tail is what gets cut. What matters is that the
-     buffer is not the file — C-x C-s says the rest if it is ever tried. */
-  snprintf(g_message, sizeof g_message, "Still locked — %s", why);
-}
-
-/* `lead` names the last attempt's failure, so the reason and the retry share
-   the one echo line rather than the prompt wiping the explanation. */
+/* Ask for the passphrase until the file opens, the user gives up, or gpg says
+ * something no passphrase would fix.
+ *
+ * A box rather than the echo line, and for the same reason the key question is
+ * one: this is asked while ccm is starting, before anything has been drawn, and
+ * a prompt on the bottom row can be lost under whatever the language setup or
+ * the theme has to say. It also masks what is typed, which is the point. */
 static void crypt_ask_pass(const char *lead)
 {
   buffer_t *b = &g_buffers[g_crypt_buf];
-  char prompt[240];
-  if (lead) snprintf(prompt, sizeof prompt, "%s — passphrase for %s: ", lead, ccm_base_name(b->path));
-  else      snprintf(prompt, sizeof prompt, "Passphrase for %s: ", ccm_base_name(b->path));
-  start_minibuffer_secret(prompt, crypt_pass_done);
+  const char *name = ccm_base_name(b->path);
+  char pass[256], msg[PATH_MAX + 320], why[256];
+  int tries, fatal = 0, ok;
+
+  for (tries = 0; tries < CRYPT_TRIES; tries++) {
+    if (lead) snprintf(msg, sizeof msg, "%s\n\n%s is encrypted.\nPassphrase to open it:", lead, name);
+    else      snprintf(msg, sizeof msg, "%s is encrypted.\nPassphrase to open it:", name);
+
+    if (!gtcaca_dialog_input("Encrypted file", msg, NULL, 1, pass, sizeof pass)) {
+      snprintf(g_message, sizeof g_message,
+               "%s left locked — C-x C-s will not write over it  (M-x revert-buffer asks again)", name);
+      return;
+    }
+    ok = crypt_unlock(pass, &fatal) == 0;
+    ccm_wipe(pass, sizeof pass);
+    if (ok) return;
+
+    snprintf(why, sizeof why, "%s", g_message);
+    /* A wrong passphrase is nearly always a typo, so ask again — but not when
+       gpg itself is what is wrong, where the answer would never change however
+       often it is asked. */
+    if (fatal) break;
+    lead = why;
+  }
+  snprintf(g_message, sizeof g_message, "Still locked — %s", lead ? lead : "wrong passphrase");
 }
 
 /* ── the recipient ───────────────────────────────────────────────────────── */
 
+/* What the box came back with. Split out from the box itself so the empty
+   answer and the cancelled one read the same way. */
 static void crypt_key_done(const char *key)
 {
   buffer_t *b;
@@ -480,7 +576,7 @@ static void crypt_key_done(const char *key)
       snprintf(g_message, sizeof g_message, "Still encrypting to %s", b->crypt_key);
     else
       snprintf(g_message, sizeof g_message,
-               "No key given — the file is left as it is");
+               "No key given — the file is left as it is  (M-x set-encryption-key asks again)");
     return;
   }
 
@@ -491,12 +587,89 @@ static void crypt_key_done(const char *key)
            "Encrypting to %s — C-x C-s writes it back encrypted", b->crypt_key);
 }
 
+/* Ask for a passphrase to encrypt with — twice, and keep it only if the two
+ * agree.
+ *
+ * This is the half of the feature that has no safety net anywhere else. A
+ * public key can always be used again because the secret half is in a keyring
+ * that outlives the session; a passphrase typed once, masked, into a file that
+ * is about to become ciphertext exists nowhere but in the user's head. A typo
+ * in it is not an inconvenience, it is the file gone. So it is asked twice and
+ * a mismatch simply asks again.
+ *
+ * Returns 1 with the agreed passphrase in `out`, 0 if the user backed out. */
+static int crypt_choose_passphrase(const char *name, int how, char *out, size_t outsz)
+{
+  char first[256], again[256], msg[PATH_MAX + 200];
+  const char *lead = "";
+  int tries;
+
+  for (tries = 0; tries < 4; tries++) {
+    snprintf(msg, sizeof msg, "%s%s %s\nChoose a %spassphrase for it:", lead, name,
+             how == CRYPT_ASK_NEW_FILE ? "does not exist yet — it will be created encrypted."
+             : how == CRYPT_ASK_CHANGE ? "is already encrypted."
+                                       : "will be written back encrypted from now on.",
+             how == CRYPT_ASK_CHANGE ? "new " : "");
+    if (!gtcaca_dialog_input("Encrypt with GnuPG", msg, NULL, 1, first, sizeof first))
+      return 0;                                  /* cancelled */
+    if (!first[0]) { lead = "An empty passphrase encrypts nothing.\n"; continue; }
+
+    snprintf(msg, sizeof msg, "Type the passphrase again to confirm it.\n"
+                              "There is no way to recover it if it is wrong.");
+    if (!gtcaca_dialog_input("Encrypt with GnuPG", msg, NULL, 1, again, sizeof again)) {
+      ccm_wipe(first, sizeof first);
+      return 0;
+    }
+    if (!strcmp(first, again)) {
+      snprintf(out, outsz, "%s", first);
+      ccm_wipe(first, sizeof first);
+      ccm_wipe(again, sizeof again);
+      return 1;
+    }
+    ccm_wipe(first, sizeof first);
+    ccm_wipe(again, sizeof again);
+    lead = "The two did not match.\n";
+  }
+  return 0;
+}
+
+/* Ask which key to encrypt to, in a box in the middle of the screen.
+ *
+ * A dialog rather than the echo line because of when it is asked: `ccm -k
+ * newfile` puts the question up before anything has been typed, and a prompt
+ * on the bottom row is easy to start typing straight past — the answer decides
+ * whether the file can be read again at all. It is also the one question here
+ * that is not a secret, so the typing is not masked: a key id or an address is
+ * meant to be checked before Enter.
+ *
+ * The box is pre-filled with whoever the file is already encrypted to, so the
+ * common answer on an existing file is Enter. */
 static void crypt_ask_key(void)
 {
-  /* Pre-filled with whoever the file is already encrypted to, so the common
-     answer to "which key?" on an existing file is Enter. */
-  start_minibuffer_init("Encrypt to key (name, email or key id): ",
-                        crypt_key_done, 0, g_buffers[g_crypt_buf].crypt_key);
+  buffer_t *b = &g_buffers[g_crypt_buf];
+  const char *name = ccm_base_name(b->path);
+  char msg[PATH_MAX + 160], key[sizeof b->crypt_key];
+  struct stat st;
+
+  g_crypt_askey = 0;
+  if (stat(b->path, &st) != 0)
+    snprintf(msg, sizeof msg,
+             "%s does not exist yet — it will be created encrypted.\n"
+             "Which key should it be encrypted to?", name);
+  else
+    snprintf(msg, sizeof msg,
+             "%s will be written back encrypted from now on.\n"
+             "Which key should it be encrypted to?", name);
+
+  if (!gtcaca_dialog_input("Encrypt with GnuPG", msg, b->crypt_key, 0, key, sizeof key)) {
+    if (b->crypt_key[0])
+      snprintf(g_message, sizeof g_message, "Still encrypting to %s", b->crypt_key);
+    else
+      snprintf(g_message, sizeof g_message,
+               "No key given — %s stays as it is  (M-x set-encryption-key asks again)", name);
+    return;
+  }
+  crypt_key_done(key);
 }
 
 /* M-x set-encryption-key — the same question, for a buffer already open. */
@@ -509,7 +682,8 @@ void ccm_crypt_set_key(int bi)
   }
   g_crypt_buf = bi;
   g_crypt_askey = 1;
-  crypt_ask_key();
+  crypt_ask_setup();
+  crypt_flush_message();
 }
 
 /* ── saving ──────────────────────────────────────────────────────────────────
@@ -530,12 +704,12 @@ int ccm_crypt_write(int bi, const char *path, const char *text, size_t len)
              ccm_base_name(path));
     return -1;
   }
-  if (!b->crypt_key[0]) {
+  if (!b->crypt_key[0] && !b->crypt_pass[0]) {
     snprintf(g_message, sizeof g_message,
-             "No key to encrypt to — M-x set-encryption-key names one");
+             "Nothing to encrypt with — M-x set-encryption-key asks for a key or a passphrase");
     return -1;
   }
-  if (ccm_gpg_encrypt(path, b->crypt_key, text, len, err, sizeof err) != 0) {
+  if (ccm_gpg_encrypt(path, b->crypt_key, b->crypt_pass, text, len, err, sizeof err) != 0) {
     snprintf(g_message, sizeof g_message, "Not saved: %s", err[0] ? err : "gpg failed");
     return -1;
   }

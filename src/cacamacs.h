@@ -86,7 +86,8 @@ typedef struct {
   int                      was_modified; /* modify flag at the last modeline refresh */
   int                      crypt;      /* GnuPG-encrypted: decrypt in, encrypt out */
   int                      locked;     /* encrypted and not decrypted yet — never write it */
-  char                     crypt_key[128];  /* recipient the saves go back to */
+  char                     crypt_key[128];  /* recipient the saves go back to (public key) */
+  char                     crypt_pass[256]; /* passphrase, when it is encrypted to no key at all */
 } buffer_t;
 
 typedef struct {
@@ -270,8 +271,9 @@ int  ccm_crypt_supported(void);
 int  ccm_file_is_encrypted(const char *path);
 char *ccm_gpg_decrypt(const char *path, const char *pass, size_t *outlen,
                       char *err, size_t errsz, int *fatal);
-int  ccm_gpg_encrypt(const char *path, const char *key, const char *data, size_t len,
-                     char *err, size_t errsz);
+/* `key` names a public key to encrypt to; NULL encrypts with `pass` instead. */
+int  ccm_gpg_encrypt(const char *path, const char *key, const char *pass,
+                     const char *data, size_t len, char *err, size_t errsz);
 int  ccm_gpg_recipient(const char *path, char *out, size_t outsz);
 void ccm_crypt_lock(int bi);            /* buffer holds a file not yet decrypted */
 void ccm_crypt_begin(int bi, const char *key);  /* ask what has to be asked */
@@ -298,8 +300,6 @@ void start_string_rectangle(void);
 void string_rect_done(const char *s);
 void start_minibuffer(const char *prompt, void (*cb)(const char *));
 void start_minibuffer_init(const char *prompt, void (*cb)(const char *), int complete, const char *initial);
-/* Same prompt with the typing masked and every copy wiped afterwards. */
-void start_minibuffer_secret(const char *prompt, void (*cb)(const char *));
 /* keymap.c */
 /* Encode a Unicode-tagged key (GTCACA_KEY_UNICODE) as UTF-8 into out[] (needs
    room for up to 4 bytes + NUL); returns the byte count, or 0 if key is not a

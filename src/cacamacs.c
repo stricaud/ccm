@@ -284,11 +284,13 @@ static void usage(FILE *out)
     "(or C-x d once running) it opens a file browser instead.\n"
     "\n"
     "  -h, --help       show this help and exit\n"
-    "  -k, --key[=KEY]  keep the file encrypted with GnuPG. Without KEY, ccm\n"
-    "                   asks which key to encrypt to; with it, e.g. -kme@ex.com\n"
-    "                   or --key=me@ex.com, it does not. A file that is already\n"
-    "                   encrypted needs no -k: ccm recognises one and asks for\n"
-    "                   the passphrase. The plain text is never written to disk\n"
+    "  -k, --key[=KEY]  keep the file encrypted with GnuPG. On its own, -k asks\n"
+    "                   for a passphrase in a box and again to confirm it, and\n"
+    "                   needs no keyring. With a key, e.g. -kme@ex.com or\n"
+    "                   --key=me@ex.com, it encrypts to that public key instead.\n"
+    "                   A file that is already encrypted needs no -k: ccm knows\n"
+    "                   one and asks for the passphrase. The plain text is never\n"
+    "                   written to disk\n"
     "  -v, --version    show the version and exit\n"
     "  -w, --warnings   let library start-up warnings through to stderr\n"
     "      --configure  write a default config.json and exit (never overwrites)\n"
@@ -507,6 +509,9 @@ int main(int argc, char **argv)
   gtcaca_main();
 
   buffer_store_globals(g_cur_buf);
+  /* A passphrase is held for as long as the buffer it opens, and no longer:
+     symmetric saves need it again, but nothing after this does. */
+  for (i = 0; i < g_nbuf; i++) ccm_wipe(g_buffers[i].crypt_pass, sizeof g_buffers[i].crypt_pass);
   for (i = 0; i < g_nbuf; i++) {
     /* A view borrows its language config from the buffer it was split from
        (see buffer_create_view): freeing it here as well would free it twice. */

@@ -154,15 +154,6 @@ void start_minibuffer_init(const char *prompt, void (*cb)(const char *), int com
 }
 void start_minibuffer(const char *prompt, void (*cb)(const char *)) { start_minibuffer_init(prompt, cb, 0, NULL); }
 
-/* A passphrase prompt: masked, and with no completion — Tab over a secret
-   would put candidates from it on the screen. */
-void start_minibuffer_secret(const char *prompt, void (*cb)(const char *))
-{
-  start_minibuffer_init(prompt, cb, 0, NULL);
-  g_mb_secret = 1;
-  mb_status();
-}
-
 /* Expand a leading "~/" to $HOME. */
 void expand_tilde(const char *in, char *out, size_t outsz)
 {

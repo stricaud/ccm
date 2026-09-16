@@ -332,36 +332,107 @@ extension.)
 
 ## Encrypted files — `ccm -k`
 
-`ccm -k notes.txt` keeps `notes.txt` encrypted with GnuPG. ccm asks which key
-to encrypt to, and from then on every `C-x C-s` writes the file back as
-ciphertext. Name the key on the command line to skip the question:
+`ccm -k notes.txt` keeps `notes.txt` encrypted with GnuPG. Every `C-x C-s`
+writes it back as ciphertext, and opening it again asks for the passphrase.
+
+There are two ways to say what it is encrypted *with*, and `-k` picks between
+them by whether you name a key.
+
+### A passphrase you choose — `ccm -k FILE`
+
+On its own, `-k` puts a box up before anything else has been drawn:
 
 ```
-ccm -k notes.txt                 # asks: Encrypt to key (name, email or key id):
-ccm -kme@example.com notes.txt   # does not
+              ┌─| Encrypt with GnuPG |──────────────────────────────────┐
+              │ notes.txt does not exist yet — it will be created       │
+              │ encrypted.                                              │
+              │ Choose a passphrase for it:                             │
+              │ [******                                               ] │
+              │                                                         │
+              │                    [ OK ] [ Cancel ]                    │
+              └─────────────────────────────────────────────────────────┘
+```
+
+then asks for it a second time:
+
+```
+              │ Type the passphrase again to confirm it.                │
+              │ There is no way to recover it if it is wrong.           │
+```
+
+If the two do not match it says so and asks again. That is not ceremony. A
+public key can always be used again because its secret half lives in a keyring
+that outlives the session; a passphrase typed once, masked, into a file that is
+about to become ciphertext exists nowhere but in your head, and a typo in it is
+not an inconvenience — it is the file gone.
+
+The typing is masked, and the file is encrypted with `gpg --symmetric`, so
+**no keyring is involved at all**. The passphrase is held for as long as the
+buffer — saving means encrypting again, and it is the only way to — and wiped
+when ccm exits.
+
+### A public key — `ccm -kKEY FILE`
+
+Name a key and ccm encrypts to it instead, with no passphrase to invent:
+
+```
+ccm -kme@example.com notes.txt
 ccm --key=me@example.com notes.txt
 ```
+
+Nothing has to be kept for the save: encrypting to a *public* key needs no
+secret. Reading it back needs the private half, so opening asks for that key's
+passphrase — unless `gpg-agent` is already holding it, or the key has none.
 
 `-k` takes its argument attached (`-kKEY`, `--key=KEY`) rather than separated,
 so that `ccm -k notes.txt` still opens `notes.txt` instead of reading the
 filename as the key.
 
-Opening one again needs no `-k` at all. ccm recognises an encrypted file — by
-the armour header, by a `.gpg`/`.pgp`/`.asc` name, or by the OpenPGP packet it
-starts with — and asks for the passphrase:
+### `-k` only asks when there is something to decide
+
+`-k` sets a file *up* to be encrypted, so it has a question to ask only when the
+file is not encrypted already. On one that is, there is nothing to settle — it
+opened, so both what it is encrypted with and how to write it back are already
+known — and `-k` asks nothing at all:
 
 ```
-Passphrase for notes.txt: *******▏
+Decrypted — C-x C-s writes it back with the same passphrase
 ```
 
-The typing is masked, and every copy of it is wiped as soon as gpg has taken
-it. Nothing has to be kept: encryption is to a *public* key, so saving the file
-again needs no secret. The key it saves back to is read off the file itself, so
-a file you were sent opens and re-encrypts to the same recipient without being
-told who that is.
+Changing the passphrase (or the key) is `M-x set-encryption-key`, which is a
+different question and says so:
 
-`M-x set-encryption-key` asks the same question for a file already open. That
-is how you start encrypting one that is not — and how you change the key an
+```
+              │ notes.txt is already encrypted.                         │
+              │ Choose a new passphrase for it:                         │
+```
+
+Naming a key outright — `ccm -kKEY notes.txt` on a file encrypted to a
+passphrase — is the one case where `-k` does change an encrypted file: you asked
+for that key by name, so the next save re-encrypts to it.
+
+### Opening one
+
+No `-k` needed. ccm recognises an encrypted file — by the armour header, by a
+`.gpg`/`.pgp`/`.asc` name, or by the OpenPGP packet it starts with — and asks:
+
+```
+                    ┌─| Encrypted file |───────────────────────────────┐
+                    │ notes.txt is encrypted.                          │
+                    │ Passphrase to open it:                           │
+                    │ [*********                                     ] │
+                    │                                                  │
+                    │                [ OK ] [ Cancel ]                 │
+                    └──────────────────────────────────────────────────┘
+```
+
+A wrong passphrase puts gpg's own reason at the top of the box and asks again,
+three times before it gives up. Which of the two kinds of file it is decides how
+it is saved back: ccm reads the recipient off the file, and a file with none was
+encrypted to a passphrase.
+
+`M-x set-encryption-key` asks the same question for a file already open — that
+is how you start encrypting one that is not, and how you change what an
 encrypted one goes back to.
 
 ### What it will not do
@@ -370,12 +441,11 @@ encrypted one goes back to.
 pipes on both ends; the bytes go through memory. There is no temporary file to
 be left behind if ccm is killed at the wrong moment.
 
-**A locked buffer is never saved over the file.** If the passphrase is wrong
-three times, or you press `C-g` at the prompt, the buffer stays empty and
-read-only and says so:
+**A locked buffer is never saved over the file.** Cancel the box, or get the
+passphrase wrong three times, and the buffer stays empty and read-only:
 
 ```
-Still locked — decryption failed: Bad session key
+Still locked — gpg: decryption failed: Bad session key
 ```
 
 `C-x C-s` on it refuses rather than replacing the ciphertext with nothing.
@@ -384,22 +454,15 @@ Still locked — decryption failed: Bad session key
 (`--passphrase-fd`), so it is not in `ps`, not in `/proc`, and not in a shell
 history.
 
-### The passphrase you are not asked for
-
-ccm asks gpg to decrypt without a passphrase first, and only prompts if that
-fails. So a key `gpg-agent` is already holding unlocked — or one with no
-passphrase at all — opens straight into the buffer with no question asked. A
-prompt whose answer is not checked is worse than no prompt.
-
 ### `gpg-program`
 
 ```json
 { "gpg-program": "/usr/local/bin/gpg2" }
 ```
 
-The binary to run. A different GnuPG, a wrapper that picks a card reader, a
-stub in a test — anything that speaks gpg's command line, since the arguments
-ccm passes are gpg's. It is not a free-form encryption command.
+The binary to run. A different GnuPG, a wrapper that picks a card reader, a stub
+in a test — anything that speaks gpg's command line, since the arguments ccm
+passes are gpg's. It is not a free-form encryption command.
 
 ### Two things to know
 
