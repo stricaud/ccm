@@ -172,7 +172,11 @@ int on_key(gtcaca_editor_widget_t *ed, int key, void *ud)
   if (ed == g_browser_ed) {
     if (key == CACA_KEY_RETURN || key == 10) { browser_open_current(); return 1; }
     if (key == 'q' || key == CACA_KEY_ESCAPE) { hide_browser(); return 1; }
-    if (key == CACA_KEY_CTRL_X) return 1;   /* swallow C-x (no save/quit chords here) */
+    /* C-x is a prefix here too. The listing used to swallow it, which meant the
+       one chord everybody reaches for — C-x C-c — did nothing at all, and the
+       only way out of ccm was to close the browser first. The chord table below
+       keeps the ones that make sense on a read-only listing and says so for the
+       rest, rather than silently editing or saving it. */
   }
 
   /* third key of a C-x r rectangle chord */
@@ -198,6 +202,22 @@ int on_key(gtcaca_editor_widget_t *ed, int key, void *ud)
   if (g_ctrl_x) {
     int reps = take_prefix();   /* consumed here; only C-x e uses the count */
     g_ctrl_x = 0;
+    /* The browser is a listing, not a document: leaving, opening something and
+       splitting the view all mean something there; saving, folding and the
+       rectangle chords do not. */
+    if (browser_is_open()) {
+      switch (key) {
+      case CACA_KEY_CTRL_C:  quit_cacamacs();       return 1;  /* C-x C-c */
+      case CACA_KEY_CTRL_F:  start_find_file();     return 1;  /* C-x C-f */
+      case 'd':              show_browser();        return 1;  /* C-x d re-reads it */
+      case 'b':              pane_switch_buffer();  return 1;  /* C-x b */
+      default:
+        snprintf(g_message, sizeof g_message,
+                 "C-x %c does nothing in the browser — C-x C-c quits, C-x C-f opens, q closes",
+                 key >= 32 ? key : '?');
+        return 1;
+      }
+    }
     switch (key) {
     case '(':                                                        /* C-x ( start macro */
       g_macro_len = 0; g_macro_recording = 1;

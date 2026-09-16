@@ -135,6 +135,14 @@ int _json_bool(gtcaca_json_value *o, const char *key, int dflt)
   gtcaca_json_value *v = gtcaca_json_object_get(o, key);
   return (v && v->type == GTCACA_JSON_BOOL) ? v->u.boolean : dflt;
 }
+static void _json_str(gtcaca_json_value *o, const char *key, char *out, size_t outsz)
+{
+  gtcaca_json_value *v = gtcaca_json_object_get(o, key);
+  if (v && v->type == GTCACA_JSON_STRING && v->u.string && v->u.string[0]) {
+    strncpy(out, v->u.string, outsz - 1);
+    out[outsz - 1] = '\0';
+  }
+}
 
 void load_config(void)
 {
@@ -150,6 +158,7 @@ void load_config(void)
   g_cfg_edge   = _json_int(root, "edgeColumn", g_cfg_edge);
   g_cfg_logfiles = _json_bool(root, "logFiles", g_cfg_logfiles);
   g_cfg_dgm_mermaid = _json_bool(root, "diagram-mermaid-default", g_cfg_dgm_mermaid);
+  _json_str(root, "gpg-program", g_cfg_gpg, sizeof g_cfg_gpg);
 
   /* per-language overrides keyed by file extension, e.g. ".py": { ... } */
   langs = gtcaca_json_object_get(root, "languages");

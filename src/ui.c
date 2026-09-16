@@ -80,6 +80,7 @@ void populate_browser(const char *dir)
 }
 
 static int g_browser_open = 0;
+int browser_is_open(void) { return g_browser_open; }
 
 void show_browser(void)
 {
@@ -133,6 +134,8 @@ const char *help_text(void)
   "         (a split shows the same file, same place, in both windows)\n"
   "Files    C-x C-f find file   C-x C-s save   C-x C-w write-as   C-x C-c quit\n"
   "         C-x d directory browser   M-x revert-buffer re-read from disk\n"
+  "         in the browser: Enter opens, q or Esc closes, C-x C-c quits ccm,\n"
+  "         C-x C-f opens by name, C-x b switches buffer, C-x d re-reads it\n"
   "         a file changed by someone else is never overwritten or discarded\n"
   "         silently: editing, saving or re-opening it asks first\n"
   "         the prompt starts in the current file's directory: type a name or\n"
@@ -163,6 +166,14 @@ const char *help_text(void)
   "Diagram  M-x diagram  draw an ASCII diagram and drop it in at the cursor\n"
   "         (select existing art first to edit it; q inserts, then C-x C-s)\n"
   "         shapes, links, an eraser — ? inside the mode lists every key\n"
+  "Encrypt  ccm -k FILE  keeps FILE encrypted with GnuPG — ccm asks which key\n"
+  "         (-kKEY or --key=KEY names it outright). Opening an encrypted file\n"
+  "         needs no -k: ccm recognises one and asks for the passphrase, and\n"
+  "         every C-x C-s writes it back encrypted. The plain text is never\n"
+  "         written to disk, and a buffer still locked is never saved over it\n"
+  "         M-x set-encryption-key  start encrypting an open file, or change\n"
+  "         the key it goes back to   \"gpg-program\" in config.json picks the\n"
+  "         binary to run\n"
   "Undo     C-_   (also C-/, C-x u, M-x undo)  Redo   C-x C-_  (or M-x redo)\n"
   "Paste    the terminal's paste goes in as one edit — C-_ takes it back whole\n"
   "Help     M-x help\n";
@@ -433,10 +444,18 @@ int buffer_create(const char *path)
   ccm_theme_apply_editor(b->ed);                 /* ~/.cacamacs/theme colours, if any */
   gtcaca_widget_hide(GTCACA_WIDGET(b->ed));
   if (path) {
-    char *c = read_file(path);
-    gtcaca_editor_set_text(b->ed, c ? c : ""); free(c);
     strncpy(b->path, path, sizeof b->path - 1); b->path[sizeof b->path - 1] = '\0';
     b->has_file = 1;
+    if (ccm_file_is_encrypted(path)) {
+      /* Nothing is read here. The passphrase is asked for in the minibuffer,
+         which answers through a callback well after this returns, so the
+         buffer starts empty and read-only and ccm_crypt_begin takes it from
+         there — see crypt.c. */
+      ccm_crypt_lock(bi);
+    } else {
+      char *c = read_file(path);
+      gtcaca_editor_set_text(b->ed, c ? c : ""); free(c);
+    }
     ccm_stamp_buffer(bi);   /* what the file looked like when we visited it */
     /* Here rather than in the callers: every route to a file — the command
        line, C-x C-f, the browser, a pane split — lands in buffer_create, and
@@ -456,7 +475,15 @@ int buffer_create(const char *path)
 
     g_ed = b->ed; g_filename = b->path; g_langcfg = NULL; g_grammar = NULL;
     g_keywords = NULL; g_n_keywords = 0; strcpy(g_langname, "fundamental"); g_folding = 0;
-    setup_language(b->ed, b->path, NULL);
+    /* secrets.txt.gpg is a text file; the .gpg says how it is stored, not what
+       is in it. So the language comes from the name underneath. */
+    { char inner[PATH_MAX]; const char *dot;
+      strncpy(inner, b->path, sizeof inner - 1); inner[sizeof inner - 1] = '\0';
+      dot = strrchr(inner, '.');
+      if (b->crypt && dot && strchr(inner, '.') != dot &&
+          (!strcasecmp(dot, ".gpg") || !strcasecmp(dot, ".pgp") || !strcasecmp(dot, ".asc")))
+        inner[dot - inner] = '\0';
+      setup_language(b->ed, inner, NULL); }
     buffer_store_globals(bi);
 
     g_ed = sed; g_filename = sfn; g_langcfg = slc; g_grammar = sgr;
@@ -704,6 +731,10 @@ void open_path_in_editor(const char *path)
   pane_show_buffer(g_focus_leaf, bi);
   relayout();
   focus_pane(g_focus_leaf);
+  /* Encrypted and not open yet: ask for the passphrase now. C-x C-f and the
+     browser land here, so this is the one place the question has to be raised
+     for every route into a file that is not the command line. */
+  if (g_buffers[bi].locked) { ccm_crypt_begin(bi, NULL); return; }
   /* Already had a buffer for it, and the file has moved on since? Emacs offers
      to reread it rather than showing you a stale copy without a word. */
   ccm_maybe_reread(bi);

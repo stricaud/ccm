@@ -254,13 +254,17 @@ static int write_default_config(void)
     "  \"//diagram-mermaid-default2\": \"ASCII art; C-x q switches either way while drawing\",\n"
     "  \"diagram-mermaid-default\": %s,\n"
     "\n"
+    "  \"//gpg-program\": \"the binary -k runs to encrypt and decrypt; any name or\",\n"
+    "  \"//gpg-program2\": \"path that speaks gpg's command line will do\",\n"
+    "  \"gpg-program\": \"%s\",\n"
+    "\n"
     "  \"//languages\": \"per-extension overrides of the three indent settings,\",\n"
     "  \"//languages ex\": \"e.g. \\\".c\\\": { \\\"insertSpaces\\\": false, \\\"tabSize\\\": 8 }\",\n"
     "  \"languages\": {}\n"
     "}\n",
     g_cfg_tab, g_cfg_spaces ? "true" : "false", g_cfg_indent,
     g_cfg_edge, g_cfg_logfiles ? "true" : "false",
-    g_cfg_dgm_mermaid ? "true" : "false");
+    g_cfg_dgm_mermaid ? "true" : "false", g_cfg_gpg);
 
   if (ferror(f) || fclose(f) != 0) {
     fprintf(stderr, "ccm: failed writing %s\n", path);
@@ -280,6 +284,11 @@ static void usage(FILE *out)
     "(or C-x d once running) it opens a file browser instead.\n"
     "\n"
     "  -h, --help       show this help and exit\n"
+    "  -k, --key[=KEY]  keep the file encrypted with GnuPG. Without KEY, ccm\n"
+    "                   asks which key to encrypt to; with it, e.g. -kme@ex.com\n"
+    "                   or --key=me@ex.com, it does not. A file that is already\n"
+    "                   encrypted needs no -k: ccm recognises one and asks for\n"
+    "                   the passphrase. The plain text is never written to disk\n"
     "  -v, --version    show the version and exit\n"
     "  -w, --warnings   let library start-up warnings through to stderr\n"
     "      --configure  write a default config.json and exit (never overwrites)\n"
@@ -292,7 +301,8 @@ static void usage(FILE *out)
     "  theme            colours — see docs/ccm-theme.example\n"
     "  config.json      tab size, indentation, per-language overrides;\n"
     "                   \"logFiles\": true also records every file opened and\n"
-    "                   written to files.log in the same directory\n"
+    "                   written to files.log in the same directory;\n"
+    "                   \"gpg-program\" names the binary -k runs (default gpg)\n"
     "  extensions/      VSCode-style grammars driving syntax colourization\n"
     "\n"
     "Inside the editor, M-x help lists every key binding.\n",
@@ -303,6 +313,9 @@ int main(int argc, char **argv)
 {
   static const struct option LONGOPTS[] = {
     { "help",     no_argument, NULL, 'h' },
+    /* optional_argument, so `-k file` still opens `file`: a required argument
+       would swallow it as the key name. -kKEY and --key=KEY give one. */
+    { "key",      optional_argument, NULL, 'k' },
     { "version",  no_argument, NULL, 'v' },
     { "warnings",  no_argument, NULL, 'w' },
     { "configure", no_argument, NULL, 'C' },  /* long-form only */
@@ -313,6 +326,7 @@ int main(int argc, char **argv)
   int cw, ch, i, b0, c, selftest = 0;
   const char *arg = NULL;
   const char *open_file_path = NULL;
+  const char *crypt_key = NULL;      /* -k: "" = ask, otherwise the key given */
   int open_dir = 0;
   long goto_line_arg = 0;
 
@@ -321,9 +335,10 @@ int main(int argc, char **argv)
      point: the OS resolves ccm's whole dylib/DLL closure (gtcaca, libcaca,
      oniguruma) at load, before main runs, so merely reaching it proves the
      libraries resolved — and it leaves no TUI behind to orphan a CI runner. */
-  while ((c = getopt_long(argc, argv, "hvw", LONGOPTS, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "hk::vw", LONGOPTS, NULL)) != -1) {
     switch (c) {
     case 'h': usage(stdout); return 0;
+    case 'k': crypt_key = optarg ? optarg : ""; break;
     case 'v': printf("ccm (cacamacs) %s\n", CCM_VERSION_STR); return 0;
     case 'w': g_warnings = 1; break;
     case 'C': return write_default_config();
@@ -476,6 +491,16 @@ int main(int argc, char **argv)
     if (!ccm_realpath(arg, g_curdir)) { strncpy(g_curdir, arg, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
     show_browser();
   }
+
+  /* The passphrase and the key are asked for in the minibuffer, which is only
+     driven once gtcaca_main() below is running — so starting the question here
+     is enough: it is on the screen before the first keystroke. */
+  if (!open_dir && b0 >= 0 && (crypt_key || g_buffers[b0].crypt))
+    ccm_crypt_begin(b0, crypt_key);
+  else if (crypt_key)
+    /* The echo line, not stderr: the display is already up and anything
+       written under it is never seen. */
+    snprintf(g_message, sizeof g_message, "-k names a file to encrypt, not a directory");
 
   gtcaca_set_paste_cb(ccm_paste, NULL);   /* a paste is one edit, not 150k keys */
   ccm_theme_show_warning();   /* surface any ~/.cacamacs/theme mistake (last, so it sticks) */

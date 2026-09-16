@@ -669,11 +669,20 @@ void write_buffer_file(gtcaca_editor_widget_t *ed)
   if (!buf) return;
   gtcaca_editor_get_text(ed, buf, len + 1);
 
-  f = fopen(path, "w");
-  if (!f) { snprintf(g_message, sizeof(g_message), "Cannot write %s", path); free(buf); return; }
-  fwrite(buf, 1, (size_t)len, f);
-  fclose(f);
-  free(buf);
+  /* An encrypted buffer never takes this route: gpg writes the file, and a
+     failure there must not fall back to writing the plain text. */
+  if (bi >= 0 && g_buffers[bi].crypt) {
+    int rc = ccm_crypt_write(bi, path, buf, (size_t)len);
+    ccm_wipe(buf, (size_t)len);
+    free(buf);
+    if (rc != 0) return;                 /* ccm_crypt_write said why */
+  } else {
+    f = fopen(path, "w");
+    if (!f) { snprintf(g_message, sizeof(g_message), "Cannot write %s", path); free(buf); return; }
+    fwrite(buf, 1, (size_t)len, f);
+    fclose(f);
+    free(buf);
+  }
 
   gtcaca_editor_set_save_point(ed);
   /* Every buffer visiting this file is now as fresh as the file itself. A

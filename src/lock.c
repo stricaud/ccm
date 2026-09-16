@@ -28,7 +28,8 @@ static int g_super_help = 0;  /* … and C-h put the explanation on screen */
 
 static int g_ask_buf = -1;    /* buffer a yes-or-no question is about */
 
-static const char *base_name(const char *p)
+/* Shared with crypt.c, which names the same file in its passphrase prompt. */
+const char *ccm_base_name(const char *p)
 {
   const char *s = p ? strrchr(p, '/') : NULL;
   return s ? s + 1 : (p ? p : "");
@@ -130,7 +131,7 @@ static const char *SUPER_HELP =
 static void super_prompt(void)
 {
   snprintf(g_message, sizeof g_message, "%s changed on disk; really edit the buffer? (y, n, r or C-h)",
-           base_name(g_buffers[g_super_buf].path));
+           ccm_base_name(g_buffers[g_super_buf].path));
 }
 
 /* Called from refresh_modeline, i.e. after every key the editor has handled:
@@ -222,7 +223,7 @@ static void ask_reread(const char *lead)
   char prompt[256];
   buffer_t *b = &g_buffers[g_ask_buf];
   snprintf(prompt, sizeof prompt, "%sFile %s changed on disk.  %s (yes or no) ",
-           lead, base_name(b->path),
+           lead, ccm_base_name(b->path),
            gtcaca_editor_get_modify(b->ed) ? "Discard your edits?" : "Reread from disk?");
   start_minibuffer(prompt, reread_done);
 }
@@ -251,7 +252,7 @@ static void ask_revert(const char *lead)
 {
   char prompt[256];
   snprintf(prompt, sizeof prompt, "%sRevert buffer from file %s? (yes or no) ",
-           lead, base_name(g_buffers[g_ask_buf].path));
+           lead, ccm_base_name(g_buffers[g_ask_buf].path));
   start_minibuffer(prompt, revert_done);
 }
 
@@ -281,7 +282,7 @@ static void ask_save_anyway(const char *lead)
 {
   char prompt[256];
   snprintf(prompt, sizeof prompt, "%s%s has changed since visited or saved.  Save anyway? (yes or no) ",
-           lead, base_name(g_buffers[g_ask_buf].path));
+           lead, ccm_base_name(g_buffers[g_ask_buf].path));
   start_minibuffer(prompt, save_anyway_done);
 }
 

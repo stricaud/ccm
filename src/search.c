@@ -85,13 +85,29 @@ static int   g_mb_point = 0;           /* caret index within g_mb_buf (0..len) *
 static int   g_mb_complete = 0;        /* Tab does filename completion */
 static int   g_mb_meta = 0;            /* an Esc (Meta) prefix is pending */
 static int   g_mb_ctrl_x = 0;          /* a C-x prefix is pending (C-x o) */
+static int   g_mb_secret = 0;          /* a passphrase: mask it, wipe every copy */
 static void (*g_mb_cb)(const char *) = NULL;
 
-/* Render the prompt + text with a caret bar (▏) drawn at point. */
+/* Render the prompt + text with a caret bar (▏) drawn at point.
+
+   A secret prompt shows one dot per character rather than the text. Per
+   *character*, not per byte, or the length of an accented passphrase would be
+   overstated — and the echo line is read over shoulders, which is the whole
+   reason the masking is there. */
 void mb_status(void)
 {
   char shown[288];
   int p = g_mb_point; if (p < 0) p = 0; if (p > g_mb_len) p = g_mb_len;
+
+  if (g_mb_secret) {
+    char mask[288];
+    int i, n = 0;
+    for (i = 0; i < g_mb_len && n < (int)sizeof mask - 4; i++)
+      if (((unsigned char)g_mb_buf[i] & 0xC0) != 0x80) mask[n++] = '*';
+    mask[n] = '\0';
+    snprintf(g_message, sizeof g_message, "%s%s\xe2\x96\x8f", g_mb_prompt, mask);
+    return;
+  }
   snprintf(shown, sizeof shown, "%.*s\xe2\x96\x8f%s", p, g_mb_buf, g_mb_buf + p);
   snprintf(g_message, sizeof g_message, "%s%s", g_mb_prompt, shown);
 }
@@ -127,6 +143,7 @@ static void mb_kill_word_right(void)
 void start_minibuffer_init(const char *prompt, void (*cb)(const char *), int complete, const char *initial)
 {
   g_mb_active = 1; g_mb_cb = cb; g_mb_complete = complete; g_mb_meta = 0;
+  g_mb_secret = 0;
   g_mb_ctrl_x = 0; completions_hide();      /* no list carried over from last time */
   strncpy(g_mb_prompt, prompt, sizeof g_mb_prompt - 1); g_mb_prompt[sizeof g_mb_prompt - 1] = '\0';
   if (initial) { strncpy(g_mb_buf, initial, sizeof g_mb_buf - 1); g_mb_buf[sizeof g_mb_buf - 1] = '\0'; }
@@ -136,6 +153,15 @@ void start_minibuffer_init(const char *prompt, void (*cb)(const char *), int com
   mb_status();
 }
 void start_minibuffer(const char *prompt, void (*cb)(const char *)) { start_minibuffer_init(prompt, cb, 0, NULL); }
+
+/* A passphrase prompt: masked, and with no completion — Tab over a secret
+   would put candidates from it on the screen. */
+void start_minibuffer_secret(const char *prompt, void (*cb)(const char *))
+{
+  start_minibuffer_init(prompt, cb, 0, NULL);
+  g_mb_secret = 1;
+  mb_status();
+}
 
 /* Expand a leading "~/" to $HOME. */
 void expand_tilde(const char *in, char *out, size_t outsz)
@@ -301,7 +327,8 @@ static const char *g_mx_commands[] = { "help", "diagram", "undo", "redo",
                                        "md-quote", "md-hr",
                                        "md-table", "md-table-row",
                                        "md-table-col", "md-table-align",
-                                       "md-github-table", NULL };
+                                       "md-github-table",
+                                       "set-encryption-key", NULL };
 
 void minibuffer_complete_command(void)
 {
@@ -391,16 +418,24 @@ int minibuffer_key(int key)
   case CACA_KEY_RETURN:
   case 10: {
     void (*cb)(const char *) = g_mb_cb;
+    int secret = g_mb_secret;
     char tmp[PATH_MAX];
     g_mb_active = 0; completions_hide(); g_message[0] = '\0';
     strncpy(tmp, g_mb_buf, sizeof tmp - 1); tmp[sizeof tmp - 1] = '\0';
+    /* The prompt's own copy goes now; the callback's goes when it returns.
+       A passphrase that outlives the question it answered is a passphrase in
+       a core dump. */
+    if (secret) { ccm_wipe(g_mb_buf, sizeof g_mb_buf); g_mb_len = g_mb_point = 0; g_mb_secret = 0; }
     if (cb) cb(tmp);
+    if (secret) ccm_wipe(tmp, sizeof tmp);
     return 1;
   }
   case CACA_KEY_TAB:    if (g_mb_complete == 2) minibuffer_complete_command();
                        else if (g_mb_complete) minibuffer_complete_path();
                        g_mb_point = g_mb_len; return 1;
   case CACA_KEY_CTRL_G: g_mb_active = 0; completions_hide();
+                        if (g_mb_secret) { ccm_wipe(g_mb_buf, sizeof g_mb_buf);
+                                           g_mb_len = g_mb_point = 0; g_mb_secret = 0; }
                         snprintf(g_message, sizeof g_message, "Quit"); return 1;
   case CACA_KEY_LEFT:  case 2 /* C-b */:                            /* step over a whole UTF-8 char */
     if (g_mb_point > 0) { g_mb_point--; while (g_mb_point > 0 && ((unsigned char)g_mb_buf[g_mb_point] & 0xC0) == 0x80) g_mb_point--; }
@@ -720,6 +755,7 @@ void mx_done(const char *cmd)
   else if (!strcmp(cmd, "md-table-row"))   md_table_row(g_ed);
   else if (!strcmp(cmd, "md-table-col"))   md_table_col(g_ed);
   else if (!strcmp(cmd, "md-table-align")) md_table_align(g_ed);
+  else if (!strcmp(cmd, "set-encryption-key")) ccm_crypt_set_key(buf_index_of(g_ed));
   else if (cmd[0])
     snprintf(g_message, sizeof g_message, "No command: %s  (try: help, diagram, md-title, undo)", cmd);
 }

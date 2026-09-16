@@ -84,6 +84,9 @@ typedef struct {
   unsigned long            fold_sig;   /* edit count when last folded, +1 (0 = never) */
   ccm_stamp_t              stamp;      /* the file as of visiting it / last saving it */
   int                      was_modified; /* modify flag at the last modeline refresh */
+  int                      crypt;      /* GnuPG-encrypted: decrypt in, encrypt out */
+  int                      locked;     /* encrypted and not decrypted yet — never write it */
+  char                     crypt_key[128];  /* recipient the saves go back to */
 } buffer_t;
 
 typedef struct {
@@ -256,7 +259,24 @@ void spell_word(gtcaca_editor_widget_t *ed);
 int  spell_key(gtcaca_editor_widget_t *ed, int key);
 
 /* lock.c — "changed on disk" prompts, as Emacs asks them */
+int  browser_is_open(void);             /* the C-x d listing is up */
 void ccm_stamp_buffer(int bi);          /* remember the file's modtime, as of now */
+const char *ccm_base_name(const char *p);
+
+/* crypt.c — GnuPG-encrypted files (-k, and any file that already is one) */
+extern char g_cfg_gpg[PATH_MAX];        /* "gpg-program" in config.json */
+void ccm_wipe(void *p, size_t n);
+int  ccm_crypt_supported(void);
+int  ccm_file_is_encrypted(const char *path);
+char *ccm_gpg_decrypt(const char *path, const char *pass, size_t *outlen,
+                      char *err, size_t errsz, int *fatal);
+int  ccm_gpg_encrypt(const char *path, const char *key, const char *data, size_t len,
+                     char *err, size_t errsz);
+int  ccm_gpg_recipient(const char *path, char *out, size_t outsz);
+void ccm_crypt_lock(int bi);            /* buffer holds a file not yet decrypted */
+void ccm_crypt_begin(int bi, const char *key);  /* ask what has to be asked */
+void ccm_crypt_set_key(int bi);         /* M-x set-encryption-key */
+int  ccm_crypt_write(int bi, const char *path, const char *text, size_t len);
 int  ccm_buffer_stale(int bi);          /* file exists and differs from that stamp */
 void ccm_revert_buffer(int bi);         /* re-read the buffer from the file on disk */
 void ccm_check_supersession(gtcaca_editor_widget_t *ed);  /* from refresh_modeline */
@@ -278,6 +298,8 @@ void start_string_rectangle(void);
 void string_rect_done(const char *s);
 void start_minibuffer(const char *prompt, void (*cb)(const char *));
 void start_minibuffer_init(const char *prompt, void (*cb)(const char *), int complete, const char *initial);
+/* Same prompt with the typing masked and every copy wiped afterwards. */
+void start_minibuffer_secret(const char *prompt, void (*cb)(const char *));
 /* keymap.c */
 /* Encode a Unicode-tagged key (GTCACA_KEY_UNICODE) as UTF-8 into out[] (needs
    room for up to 4 bytes + NUL); returns the byte count, or 0 if key is not a

@@ -14,6 +14,10 @@ cacamacs [file | directory] [language-configuration.json]
   read-only editor showing one entry per line, so it works like the editor:
   arrows/`C-n`/`C-p` move, `C-s` searches the listing, Enter descends into a
   folder (`../` goes up) or opens a file, and `q`/`Esc` closes it.
+  The `C-x` chords that mean something on a listing work there too: `C-x C-c`
+  quits ccm, `C-x C-f` opens a file by name, `C-x b` switches buffer and
+  `C-x d` re-reads the directory. The rest say so rather than saving or
+  folding a listing that is not a document.
 - An optional explicit `language-configuration.json` forces that config.
 
 ## Key bindings
@@ -282,6 +286,7 @@ Controls indentation, with optional per-extension overrides:
   "indentSize": 4,
   "edgeColumn": 80,
   "logFiles": false,
+  "gpg-program": "gpg",
   "languages": {
     ".py": { "tabSize": 4, "insertSpaces": true, "indentSize": 4 },
     ".c":  { "insertSpaces": false, "tabSize": 8 }
@@ -294,6 +299,7 @@ Controls indentation, with optional per-extension overrides:
 - `indentSize` — number of spaces inserted when `insertSpaces` is true.
 - `edgeColumn` — column to draw the edge/ruler marker at (0 = off).
 - `logFiles` — boolean, `false` unless set. See below.
+- `gpg-program` — the binary `-k` runs. See below.
 - `languages` — overrides keyed by file extension (merged over the globals).
 
 ### File log — `logFiles`
@@ -323,6 +329,85 @@ A ready-to-copy sample is in
 [examples/cacamacs-config.json](../examples/cacamacs-config.json). (Indentation
 is a user preference, so it lives here rather than inside an installed
 extension.)
+
+## Encrypted files — `ccm -k`
+
+`ccm -k notes.txt` keeps `notes.txt` encrypted with GnuPG. ccm asks which key
+to encrypt to, and from then on every `C-x C-s` writes the file back as
+ciphertext. Name the key on the command line to skip the question:
+
+```
+ccm -k notes.txt                 # asks: Encrypt to key (name, email or key id):
+ccm -kme@example.com notes.txt   # does not
+ccm --key=me@example.com notes.txt
+```
+
+`-k` takes its argument attached (`-kKEY`, `--key=KEY`) rather than separated,
+so that `ccm -k notes.txt` still opens `notes.txt` instead of reading the
+filename as the key.
+
+Opening one again needs no `-k` at all. ccm recognises an encrypted file — by
+the armour header, by a `.gpg`/`.pgp`/`.asc` name, or by the OpenPGP packet it
+starts with — and asks for the passphrase:
+
+```
+Passphrase for notes.txt: *******▏
+```
+
+The typing is masked, and every copy of it is wiped as soon as gpg has taken
+it. Nothing has to be kept: encryption is to a *public* key, so saving the file
+again needs no secret. The key it saves back to is read off the file itself, so
+a file you were sent opens and re-encrypts to the same recipient without being
+told who that is.
+
+`M-x set-encryption-key` asks the same question for a file already open. That
+is how you start encrypting one that is not — and how you change the key an
+encrypted one goes back to.
+
+### What it will not do
+
+**The plain text never touches the disk.** gpg runs as a child process with
+pipes on both ends; the bytes go through memory. There is no temporary file to
+be left behind if ccm is killed at the wrong moment.
+
+**A locked buffer is never saved over the file.** If the passphrase is wrong
+three times, or you press `C-g` at the prompt, the buffer stays empty and
+read-only and says so:
+
+```
+Still locked — decryption failed: Bad session key
+```
+
+`C-x C-s` on it refuses rather than replacing the ciphertext with nothing.
+
+**The passphrase is never an argument.** It goes to gpg down a pipe of its own
+(`--passphrase-fd`), so it is not in `ps`, not in `/proc`, and not in a shell
+history.
+
+### The passphrase you are not asked for
+
+ccm asks gpg to decrypt without a passphrase first, and only prompts if that
+fails. So a key `gpg-agent` is already holding unlocked — or one with no
+passphrase at all — opens straight into the buffer with no question asked. A
+prompt whose answer is not checked is worse than no prompt.
+
+### `gpg-program`
+
+```json
+{ "gpg-program": "/usr/local/bin/gpg2" }
+```
+
+The binary to run. A different GnuPG, a wrapper that picks a card reader, a
+stub in a test — anything that speaks gpg's command line, since the arguments
+ccm passes are gpg's. It is not a free-form encryption command.
+
+### Two things to know
+
+The language for colouring comes from the name *under* the extension, so
+`config.json.gpg` is still JSON once it is open.
+
+Encrypted files are a POSIX feature: running gpg this way needs `fork`/`exec`
+with four pipes, and the Windows build says so rather than half-doing it.
 
 ## Languages — VSCode-style extensions
 

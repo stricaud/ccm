@@ -114,7 +114,8 @@ endif()
 add_executable(ccm
   src/cacamacs.c src/games.c src/diag.c
   src/edit.c src/search.c src/keymap.c src/lang.c src/ui.c src/lock.c
-  src/spell.c src/theme.c src/markdown.c src/diagram.c src/diagram_model.c)
+  src/spell.c src/theme.c src/markdown.c src/crypt.c
+  src/diagram.c src/diagram_model.c)
 
 # Compiled-in version string for `ccm --version` (the packaging smoke test's
 # entry point — it forces the loader to resolve every dylib/DLL, then exits).
