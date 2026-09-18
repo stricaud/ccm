@@ -12,12 +12,16 @@ cacamacs [file | directory] [language-configuration.json]
 - A **file** opens in the editor.
 - A **directory** opens the file browser (also `C-x d`). The browser is a
   read-only editor showing one entry per line, so it works like the editor:
-  arrows/`C-n`/`C-p` move, `C-s` searches the listing, Enter descends into a
-  folder (`../` goes up) or opens a file, and `q`/`Esc` closes it.
+  arrows/`C-n`/`C-p` move, `C-s` searches the listing, `M-<` and `M->` jump to
+  either end of it, Enter descends into a folder (`../` goes up) or opens a
+  file, and `q` closes it.
   The `C-x` chords that mean something on a listing work there too: `C-x C-c`
   quits ccm, `C-x C-f` opens a file by name, `C-x b` switches buffer and
   `C-x d` re-reads the directory. The rest say so rather than saving or
   folding a listing that is not a document.
+- `Esc` is the Meta prefix in these read-only panes — the browser, the help
+  window and `*Completions*` — as it is everywhere else, so `M->` jumps to the
+  last entry rather than closing the pane. `Esc Esc` closes, and so does `q`.
 - An optional explicit `language-configuration.json` forces that config.
 
 ## Key bindings
@@ -26,7 +30,7 @@ cacamacs [file | directory] [language-configuration.json]
 Motion   C-f C-b C-n C-p  C-a C-e  C-v   arrows / Home / End / PageUp / PageDown
          M-< / M->  beginning / end of buffer
          (C-n / C-p step through wrapped rows when line wrap is on)
-Help     M-x help  (a scrollable key-binding window; q or Esc closes it)
+Help     M-x help  (a scrollable key-binding window; q or Esc Esc closes it)
          M-x runs a command by name (help, diagram, undo, redo, goto-line, …; Tab completes)
 Diagram  M-x diagram  drag-and-drop ASCII diagrams (see below)
 Edit     C-d delete-fwd   C-k kill-line  Backspace   Tab indent / complete

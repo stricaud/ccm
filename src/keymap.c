@@ -149,29 +149,44 @@ int on_key(gtcaca_editor_widget_t *ed, int key, void *ud)
   if (g_isearch)     return isearch_key(ed, key);
   if (g_qr_active)   return query_replace_key(ed, key);
   if (g_spell_active) return spell_key(ed, key);
+  /* Esc closes a read-only pane — but Esc is also the Meta prefix, and a pane
+     that swallows it can never reach anything behind Meta. M-> to the end of a
+     long listing is exactly what you want there, and it was quitting instead.
+     So Esc arms Meta here as it does everywhere else and Esc Esc closes: one
+     keystroke more for the close, every M- chord back for the price. `q` still
+     closes on its own, unless Meta is pending and it is really M-q. */
+#define CCM_PANE_CLOSE_KEY(hide)                                             \
+  do {                                                                       \
+    if (key == CACA_KEY_ESCAPE && g_meta) { g_meta = 0; hide(); return 1; }  \
+    if (key == 'q' && !g_meta) { hide(); return 1; }                         \
+  } while (0)
+
   /* Completions window: while the caret is in it the prompt must stop
      swallowing keys, so motion, C-s and the rest work there as in any buffer.
-     Only Enter and q/Esc mean something extra. */
+     Only Enter and q / Esc Esc mean something extra. */
   if (completions_focused()) {
-    if (key == CACA_KEY_RETURN || key == 10) { completions_pick_at_point(); return 1; }
-    if (key == 'q' || key == CACA_KEY_ESCAPE) { completions_hide(); mb_status(); return 1; }
+    if ((key == CACA_KEY_RETURN || key == 10) && !g_meta) { completions_pick_at_point(); return 1; }
+    if (key == CACA_KEY_ESCAPE && g_meta) { g_meta = 0; completions_hide(); mb_status(); return 1; }
+    if (key == 'q' && !g_meta) { completions_hide(); mb_status(); return 1; }
   } else if (g_mb_active) {
     return minibuffer_key(key);
   }
 
-  /* help viewer: read-only and scrollable — q/Esc close it, C-s searches, and
-     arrows / PageUp / PageDown / C-v fall through to the editor for scrolling. */
+  /* help viewer: read-only and scrollable — q or Esc Esc closes it, C-s
+     searches, and arrows / PageUp / PageDown / C-v fall through to the editor
+     for scrolling. */
   if (ed == g_help_ed) {
-    if (key == 'q' || key == CACA_KEY_ESCAPE) { hide_help(); return 1; }
+    CCM_PANE_CLOSE_KEY(hide_help);
     if (key == CACA_KEY_CTRL_X) return 1;   /* swallow C-x */
   }
 
   /* browser mode: the listing is a read-only editor — Enter opens the entry,
-     q/Esc close it, and everything else (arrows, C-s search, …) falls through
-     to the normal editor handling (edits are no-ops because it is read-only). */
+     q or Esc Esc closes it, and everything else (arrows, M-< / M-> to either
+     end, C-s search, …) falls through to the normal editor handling (edits are
+     no-ops because it is read-only). */
   if (ed == g_browser_ed) {
-    if (key == CACA_KEY_RETURN || key == 10) { browser_open_current(); return 1; }
-    if (key == 'q' || key == CACA_KEY_ESCAPE) { hide_browser(); return 1; }
+    if ((key == CACA_KEY_RETURN || key == 10) && !g_meta) { browser_open_current(); return 1; }
+    CCM_PANE_CLOSE_KEY(hide_browser);
     /* C-x is a prefix here too. The listing used to swallow it, which meant the
        one chord everybody reaches for — C-x C-c — did nothing at all, and the
        only way out of ccm was to close the browser first. The chord table below
