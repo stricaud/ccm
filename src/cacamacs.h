@@ -261,6 +261,7 @@ int  spell_key(gtcaca_editor_widget_t *ed, int key);
 
 /* lock.c — "changed on disk" prompts, as Emacs asks them */
 int  browser_is_open(void);             /* the C-x d listing is up */
+gtcaca_editor_widget_t *ccm_active_editor(void);  /* the pane in front, else g_ed */
 void ccm_stamp_buffer(int bi);          /* remember the file's modtime, as of now */
 const char *ccm_base_name(const char *p);
 

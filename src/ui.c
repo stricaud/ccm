@@ -82,6 +82,22 @@ void populate_browser(const char *dir)
 static int g_browser_open = 0;
 int browser_is_open(void) { return g_browser_open; }
 
+/* The editor a command should act on.
+ *
+ * `g_ed` is the buffer in the focused window, which is not the same thing as
+ * the editor in front of you: the browser and the help window are modal panes
+ * over it with editors of their own. A key handler is handed the right one, but
+ * an M-x command is run from a minibuffer callback long after the key that
+ * started it, and has only the globals to go on — which is how M-x set-mark in
+ * the browser came to set a mark in the file behind it and report "Mark set",
+ * and M-x copy-region then found no region anywhere. */
+gtcaca_editor_widget_t *ccm_active_editor(void)
+{
+  if (g_browser_open) return g_browser_ed;
+  if (g_help_open)    return g_help_ed;
+  return g_ed;
+}
+
 void show_browser(void)
 {
   if (!g_curdir[0]) { if (!ccm_realpath(".", g_curdir)) strcpy(g_curdir, "."); }
@@ -137,6 +153,8 @@ const char *help_text(void)
   "         in the browser: Enter opens, M-< / M-> jump to either end, q or\n"
   "         Esc Esc closes, C-x C-c quits ccm, C-x C-f opens by name,\n"
   "         C-x b switches buffer, C-x d re-reads it\n"
+  "         a name can be lifted out of it like any other text: C-space (or\n"
+  "         M-x set-mark), C-e, M-w — then q and C-y where you want it\n"
   "         a file changed by someone else is never overwritten or discarded\n"
   "         silently: editing, saving or re-opening it asks first\n"
   "         the prompt starts in the current file's directory: type a name or\n"

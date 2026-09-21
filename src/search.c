@@ -716,12 +716,14 @@ void mx_done(const char *cmd)
   /* Keyboard region without C-space: macOS binds Ctrl-Space to Input Sources,
      and when it does the chord never reaches the terminal at all — leaving no
      other way to set a mark, since C-x SPC starts a *rectangle* mark. */
+  /* On the pane in front, not the buffer behind it: these three are how you
+     lift a filename out of the browser on a Mac, where C-space never arrives. */
   else if (!strcmp(cmd, "set-mark"))
-    set_mark(g_ed);
+    set_mark(ccm_active_editor());
   else if (!strcmp(cmd, "copy-region"))
-    copy_region(g_ed);
+    copy_region(ccm_active_editor());
   else if (!strcmp(cmd, "kill-region"))
-    kill_region(g_ed);
+    kill_region(ccm_active_editor());
   else if (!strcmp(cmd, "insert-date"))
     insert_date(g_ed);
   else if (!strcmp(cmd, "insert-time"))

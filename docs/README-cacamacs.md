@@ -22,6 +22,10 @@ cacamacs [file | directory] [language-configuration.json]
 - `Esc` is the Meta prefix in these read-only panes — the browser, the help
   window and `*Completions*` — as it is everywhere else, so `M->` jumps to the
   last entry rather than closing the pane. `Esc Esc` closes, and so does `q`.
+- A filename can be lifted out of the listing like any other text: `C-space`,
+  `C-e`, `M-w`, then `q` and `C-y` where you want it. `M-x set-mark` and
+  `M-x copy-region` do the same for a Mac that keeps `C-space` for Input
+  Sources — they act on the pane in front, not on the buffer behind it.
 - An optional explicit `language-configuration.json` forces that config.
 
 ## Key bindings
