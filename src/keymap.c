@@ -16,10 +16,17 @@ void ccm_paste(const char *text, int len, void *ud)
   (void)ud;
   if (diagram_paste(text, len)) return;
   if (g_mb_active || g_isearch || g_qr_active || g_spell_active) {
-    for (i = 0; i < len; i++) {
+    for (i = 0; i < len; ) {
       unsigned char c = (unsigned char)text[i];
-      if (c == '\n' || c == '\r') continue;       /* one line is all these accept */
-      on_key(g_ed, (int)c, NULL);
+      if (c == '\n' || c == '\r') { i++; continue; } /* one line is all these accept */
+      if (c < 0x80) { on_key(g_ed, (int)c, NULL); i++; continue; }
+      /* A multi-byte character goes in as one key, tagged the way the toolkit
+         delivers typed accents — byte by byte it would come out as mojibake. */
+      { size_t got = 0;
+        uint32_t cp = caca_utf8_to_utf32(text + i, &got);
+        if (!got) { i++; continue; }
+        on_key(g_ed, (int)(cp | GTCACA_KEY_UNICODE), NULL);
+        i += (int)got; }
     }
     return;
   }
