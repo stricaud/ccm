@@ -37,8 +37,15 @@ jobs:
           # image. 22.04's glibc 2.35 covers Debian 12 and the current LTSes; it
           # is also what the manylinux tag on the wheel is derived from.
           - { os: ubuntu-22.04, label: linux-x86_64  }
-          # macOS arm64 only for now (Apple Silicon).
-          - { os: macos-14,     label: macos-arm64    }
+          # macOS arm64 only for now (Apple Silicon). Pinned for the same
+          # reason as ubuntu above — the image sets the floor, here through the
+          # Homebrew bottles' Mach-O `minos`, which is what packaging/wheel.py
+          # reads to tag the wheel — so the oldest image still offered is the
+          # one to build on. That is 15: the macos-14 images were retired from
+          # Actions on 2026-11-02 (actions/runner-images#15226), which is why a
+          # run on them now fails outright with "The configuration
+          # 'macos-14-arm64-us-default' is not supported".
+          - { os: macos-15,     label: macos-arm64    }
           - { os: windows-latest, label: windows-x86_64 }
 
     # Every step runs in the MSYS2 UCRT64 shell on Windows, and the default shell
