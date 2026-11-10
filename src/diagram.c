@@ -24,6 +24,7 @@
 #include <gtcaca/dialog.h>
 
 #include "cacamacs.h"
+#include "hex.h"
 #include "diagram.h"
 
 enum { TOOL_SELECT = 0, TOOL_SHAPE, TOOL_TEXT, TOOL_CONN, TOOL_ERASE,
@@ -2536,7 +2537,15 @@ void run_diagram(void)
              "Empty canvas — draw, then q drops it into the buffer at your cursor (? for help)");
 
   pane_hide_all();
-  for (i = 0; i < g_nbuf; i++) if (g_buffers[i].ed) g_buffers[i].ed->has_focus = 0;
+  for (i = 0; i < g_nbuf; i++) {
+    if (g_buffers[i].ed) g_buffers[i].ed->has_focus = 0;
+    /* A hex buffer's input layer is a focused custom widget, and so is this
+       canvas: leaving the pane's focused would have both reading every key. */
+    if (g_buffers[i].hex) {
+      ccm_hex_input(i)->has_focus = 0;
+      ccm_hex_view(i)->has_focus  = 0;
+    }
+  }
   for (i = 0; i < MAXLEAVES; i++) if (g_winpool[i]) g_winpool[i]->has_focus = 0;
   if (g_browser_win) g_browser_win->has_focus = 0;
   if (g_browser_ed)  g_browser_ed->has_focus = 0;

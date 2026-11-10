@@ -1,5 +1,6 @@
 #include "cacamacs.h"
 #include "diagram.h"
+#include "hex.h"
 /* ── incremental search (C-s / C-r), à la Emacs isearch ────────────────────── */
 
 int g_isearch = 0;
@@ -304,6 +305,7 @@ static const char *g_mx_commands[] = { "help", "diagram", "undo", "redo",
                                        "query-replace", "query-replace-regexp",
                                        "replace-string", "goto-line",
                                        "revert-buffer",
+                                       "hex-mode", "hex-mode-exit",
                                        "set-mark", "copy-region", "kill-region",
                                        "json-pretty-print", "xml-pretty-print",
                                        "insert-date", "insert-time",
@@ -681,13 +683,21 @@ void mx_done(const char *cmd)
   else if (!strcmp(cmd, "diagram") || !strcmp(cmd, "artist"))
     run_diagram();
   else if (!strcmp(cmd, "undo")) {
-    gtcaca_editor_undo(g_ed);
+    /* A hex buffer keeps an undo history of its own: its edits are in its
+       bytes, and its editor widget never sees one (hex.c). */
+    if (g_cur_buf >= 0 && g_buffers[g_cur_buf].hex) ccm_hex_undo(g_cur_buf);
+    else {
+      gtcaca_editor_undo(g_ed);
+      snprintf(g_message, sizeof g_message, "Undo   (C-_ or C-x u does the same)");
+    }
     g_mark_active = 0;
-    snprintf(g_message, sizeof g_message, "Undo   (C-_ or C-x u does the same)");
   } else if (!strcmp(cmd, "redo")) {
-    gtcaca_editor_redo(g_ed);
+    if (g_cur_buf >= 0 && g_buffers[g_cur_buf].hex) ccm_hex_redo(g_cur_buf);
+    else {
+      gtcaca_editor_redo(g_ed);
+      snprintf(g_message, sizeof g_message, "Redo   (C-x C-_ does the same)");
+    }
     g_mark_active = 0;
-    snprintf(g_message, sizeof g_message, "Redo   (C-x C-_ does the same)");
   }
   else if (!strcmp(cmd, "snake"))
     run_snake();
@@ -749,6 +759,9 @@ void mx_done(const char *cmd)
   else if (!strcmp(cmd, "md-table-col"))   md_table_col(g_ed);
   else if (!strcmp(cmd, "md-table-align")) md_table_align(g_ed);
   else if (!strcmp(cmd, "set-encryption-key")) ccm_crypt_set_key(buf_index_of(g_ed));
+  /* hexl-mode is what Emacs calls it, and what fingers type. */
+  else if (!strcmp(cmd, "hex-mode") || !strcmp(cmd, "hexl-mode")) ccm_hex_mode();
+  else if (!strcmp(cmd, "hex-mode-exit") || !strcmp(cmd, "hexl-mode-exit")) ccm_hex_mode_exit();
   else if (cmd[0])
     snprintf(g_message, sizeof g_message, "No command: %s  (try: help, diagram, md-title, undo)", cmd);
 }

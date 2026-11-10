@@ -68,6 +68,10 @@ static inline char *ccm_realpath(const char *path, char *resolved) {
    that does not exist yet. See lock.c. */
 typedef struct { int exists; time_t sec; long nsec; long long size; } ccm_stamp_t;
 
+/* Hex mode's per-buffer state (hex.c owns it; see hex.h). A buffer is showing
+   its file as hex exactly when buffer_t.hex is non-NULL. */
+struct ccm_hex_t;
+
 typedef struct {
   gtcaca_editor_widget_t  *ed;
   char                     path[PATH_MAX];
@@ -88,6 +92,11 @@ typedef struct {
   int                      locked;     /* encrypted and not decrypted yet — never write it */
   char                     crypt_key[128];  /* recipient the saves go back to (public key) */
   char                     crypt_pass[256]; /* passphrase, when it is encrypted to no key at all */
+  int                      comp;       /* CCM_COMP_*: decompress in, compress out */
+  int                      comp_ro;    /* compressed but not round-trippable — never write it */
+  int                      arc_member; /* extracted from an archive — there is no file to write */
+  char                     comp_note[192]; /* why it opened as it did; shown once it is open */
+  struct ccm_hex_t        *hex;       /* non-NULL: a binary file, shown as bytes (hex.c) */
 } buffer_t;
 
 typedef struct {
@@ -280,6 +289,43 @@ void ccm_crypt_lock(int bi);            /* buffer holds a file not yet decrypted
 void ccm_crypt_begin(int bi, const char *key);  /* ask what has to be asked */
 void ccm_crypt_set_key(int bi);         /* M-x set-encryption-key */
 int  ccm_crypt_write(int bi, const char *path, const char *text, size_t len);
+
+/* compress.c — gzip/bzip2/xz files opened as the text inside them */
+enum {
+  CCM_COMP_NONE = 0,
+  CCM_COMP_GZ,                          /* zlib, the only one ccm writes */
+  CCM_COMP_BZ2,
+  CCM_COMP_XZ,
+  CCM_COMP_RAW                          /* headerless deflate: a zip member */
+};
+/* Ceiling on what one file may decompress to: ratios are unbounded, so without
+   it the wrong .gz takes the machine down rather than the editor. */
+#define CCM_COMP_MAX_BYTES (512ull * 1024 * 1024)
+int  ccm_comp_format(const char *path);          /* by extension, else by magic */
+const char *ccm_comp_name(int fmt);
+int  ccm_comp_supported(int fmt);                /* built with that library? */
+int  ccm_comp_writable(int fmt);                 /* gzip only */
+char *ccm_slurp(const char *path, size_t *outlen, char *err, size_t errsz);
+char *ccm_comp_read_mem(const void *in, size_t inlen, int fmt, size_t *outlen,
+                        char *err, size_t errsz);
+char *ccm_comp_read_file(const char *path, int fmt, size_t *outlen,
+                         char *err, size_t errsz);
+int  ccm_comp_write_file(const char *path, int fmt, const void *data, size_t len,
+                         char *err, size_t errsz);
+int  ccm_is_text(const char *p, size_t n);       /* no NUL byte to truncate on */
+void ccm_comp_open(int bi, int fmt);             /* buffer_create: fill from a .gz */
+int  ccm_comp_write(int bi, const char *path, const char *text, size_t len);
+
+/* archive.c — .zip and .tar[.gz|.bz2|.xz] browsed as directories, read-only */
+typedef struct { char name[NAME_MAX + 1]; int isdir; long long size; } ccm_arc_child_t;
+int  ccm_is_archive(const char *path);
+int  ccm_archive_enter(const char *path, char *err, size_t errsz);
+void ccm_archive_close(void);
+const char *ccm_archive_path(void);     /* the cached archive, "" if none */
+int  ccm_archive_is_open(void);
+/* Entries directly under `sub` ("" = archive root). Caller frees *out. */
+int  ccm_archive_children(const char *sub, ccm_arc_child_t **out, int *nout);
+char *ccm_archive_extract(const char *member, size_t *outlen, char *err, size_t errsz);
 int  ccm_buffer_stale(int bi);          /* file exists and differs from that stamp */
 void ccm_revert_buffer(int bi);         /* re-read the buffer from the file on disk */
 void ccm_check_supersession(gtcaca_editor_widget_t *ed);  /* from refresh_modeline */
@@ -296,6 +342,7 @@ int  ccm_default_theme_present(void);
 void ccm_theme_load(void);
 void ccm_theme_apply_global(void);
 void ccm_theme_apply_editor(gtcaca_editor_widget_t *ed);
+int  ccm_theme_ansi(int *fg, int *bg);   /* the theme as plain ANSI, for hex.c */
 void ccm_theme_show_warning(void);
 void start_string_rectangle(void);
 void string_rect_done(const char *s);
@@ -365,6 +412,8 @@ void pane_split(int rows);
 void pane_switch_buffer(void);
 void pane_unsplit_one(void);
 void populate_browser(const char *dir);
+void populate_archive(const char *sub);  /* the listing inside the cached archive */
+int  browse_archive(const char *path);   /* step into an archive; 0 if we did */
 void position_leaf(int n);
 void relayout(void);
 void save_as_done(const char *input);

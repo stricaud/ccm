@@ -1,6 +1,7 @@
 #include <gtcaca/dialog.h>
 
 #include "cacamacs.h"
+#include "hex.h"
 /* ── kill ring (single register) ───────────────────────────────────────────── */
 
 /* The kill ring, and the system clipboard with it: killing or copying here
@@ -664,6 +665,31 @@ void write_buffer_file(gtcaca_editor_widget_t *ed)
   path = (bi >= 0 && g_buffers[bi].has_file) ? g_buffers[bi].path : g_filename;
   if (!path) return;
 
+  /* A buffer holding an archive member has no file behind it — its name is
+     "<archive>!<member>", which nothing can write. Caught before anything is
+     allocated so there is no chance of leaving that name on disk. */
+  if (bi >= 0 && g_buffers[bi].arc_member) {
+    snprintf(g_message, sizeof g_message,
+             "%s is inside an archive — ccm reads archives but does not write them",
+             ccm_base_name(path));
+    return;
+  }
+
+  /* A hex buffer's document is its bytes, and its editor widget is an empty
+     one nobody sees (see hex.c). Every route to a write comes through here —
+     C-x C-s, the "save anyway?" answer in lock.c, M-x save-buffer — so this is
+     the one place that has to know, and writing the editor's text instead
+     would truncate the file to nothing. */
+  if (bi >= 0 && g_buffers[bi].hex) {
+    if (ccm_hex_write(bi, path) != 0) return;   /* it said why */
+    { int i;
+      for (i = 0; i < g_nbuf; i++)
+        if (g_buffers[i].has_file && !strcmp(g_buffers[i].path, path)) ccm_stamp_buffer(i); }
+    ccm_log_file('W', path);
+    snprintf(g_message, sizeof g_message, "Wrote %s", path);
+    return;
+  }
+
   len = gtcaca_editor_get_length(ed);
   buf = malloc((size_t)len + 1);
   if (!buf) return;
@@ -676,6 +702,12 @@ void write_buffer_file(gtcaca_editor_widget_t *ed)
     ccm_wipe(buf, (size_t)len);
     free(buf);
     if (rc != 0) return;                 /* ccm_crypt_write said why */
+  } else if (bi >= 0 && g_buffers[bi].comp) {
+    /* Same reasoning for a compressed buffer: the name says .gz, so a plain
+       write would leave a text file wearing a compressed file's name. */
+    int rc = ccm_comp_write(bi, path, buf, (size_t)len);
+    free(buf);
+    if (rc != 0) return;                 /* ccm_comp_write said why */
   } else {
     f = fopen(path, "w");
     if (!f) { snprintf(g_message, sizeof(g_message), "Cannot write %s", path); free(buf); return; }
@@ -711,7 +743,10 @@ static int unsaved_count(int *first)
   if (first) *first = -1;
   for (i = 0; i < g_nbuf; i++) {
     if (!g_buffers[i].ed || g_buffers[i].is_view) continue;
-    if (!gtcaca_editor_get_modify(g_buffers[i].ed)) continue;
+    /* A hex buffer's edits are in its bytes, not in its (unseen) editor, so
+       C-x C-c has to ask about those too. */
+    if (g_buffers[i].hex) { if (!ccm_hex_modified(i)) continue; }
+    else if (!gtcaca_editor_get_modify(g_buffers[i].ed)) continue;
     if (n == 0 && first) *first = i;
     n++;
   }

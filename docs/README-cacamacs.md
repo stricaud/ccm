@@ -70,6 +70,9 @@ Files    C-x C-f find file (Tab completes; a directory opens the browser)
 View     C-x l line numbers   C-x f folding   C-x t toggle fold   C-x a annotate
          C-x C-l line wrap (on by default; turn off to scroll long lines)
 JSON     C-x p pretty-print (.json/.jsonl open in JSON mode automatically)
+Binary   a file with a NUL byte in it opens as hex (see below) — 0-9 a-f type
+         over a byte, Tab crosses to the ASCII side, C-s finds bytes or text,
+         M-g goes to an offset, ? lists the mode's own keys
 Complete Tab (after a word)  — Up/Down choose, Enter/Tab accept, Esc cancel
 ```
 
@@ -479,6 +482,213 @@ The language for colouring comes from the name *under* the extension, so
 
 Encrypted files are a POSIX feature: running gpg this way needs `fork`/`exec`
 with four pipes, and the Windows build says so rather than half-doing it.
+
+## Binary files — hex mode
+
+A file with a NUL byte in it is not text. The editor holds a C string, so such a
+file used to come up *empty* from the first NUL on, and saving it would have
+written that emptiness over the file. So cacamacs shows it as what it is:
+
+```
+00000000  7f 45 4c 46 02 01 01 00  00 00 00 00 00 00 00 00  |.ELF............|
+00000010  03 00 3e 00 01 00 00 00  40 1c 00 00 00 00 00 00  |..>.....@.......|
+00000020  40 00 00 00 00 00 00 00  18 b2 01 00 00 00 00 00  |@...............|
+```
+
+Offsets on the left, the hex in the middle, the ASCII on the right, and the
+bytes — not a rendering of them — are the document. This is the gtcaca
+`hexview` widget sitting in an ordinary ccm buffer, so it is in a pane like any
+other: `C-x o`, `C-x b`, `C-x 2`, the browser and the modeline all behave.
+
+The width adapts: 16 bytes to a row where the pane is wide enough, 8 where it
+is not.
+
+### Moving
+
+```
+C-f C-b C-n C-p   next / previous byte, next / previous row (arrows too)
+C-a C-e           start / end of the row
+C-v M-v           page down / page up   (PageDown / PageUp)
+M-< M->           first / last byte
+M-g               go to an offset — hex by default, #1024 for decimal
+C-l               recentre the view on the cursor
+Tab               cross between the hex side and the ASCII side
+click, wheel      put the cursor on a byte, scroll; drag selects
+```
+
+The cursor is one byte in both panes at once: bright where you are typing,
+dimmed on the other side, so it is always clear which half a keystroke goes to.
+
+### Editing
+
+```
+0-9 a-f           type over the byte under the cursor, a nibble at a time
+any character     on the ASCII side, type over the byte with that character
+Insert            insert rather than overwrite — the file grows as you type
+C-o               insert a 00 byte at the cursor
+M-o               append a 00 byte at the end of the file
+C-d  Backspace    delete the byte at / before the cursor
+C-_  C-/  C-x u   undo        C-x C-_   redo
+C-x C-q           read-only on / off
+C-u N <key>       do it N times — C-u 16 C-f, C-u 8 C-o, C-u 4 C-d
+C-x ( … C-x )     record a keyboard macro; C-x e (C-u N C-x e) replays it
+```
+
+Typing `41` over a byte is two keystrokes and one change, so one `C-_` gives the
+whole byte back rather than leaving `0x40` behind.
+
+**Bytes you have changed are drawn in red** until the buffer is saved — which is
+how you see what you did to a file where everything looks equally like noise.
+Inserting or deleting marks everything after it, because that is what moved.
+
+The digits after `C-u` are the count, not hex input, so `C-u 8 C-o` inserts
+eight bytes but there is no `C-u` way to repeat a nibble; a keyboard macro does
+that, and patches every Nth byte besides.
+
+### The region
+
+`C-Space` sets the mark and moving selects bytes, as in a text buffer. `M-w`
+copies the region to the kill ring *as hex* (`de ad be ef`), `C-w` cuts it, and
+`C-y` yanks. What `C-y` puts in depends on what is in the kill ring, under the
+same rule the search prompt uses: hex if it reads as hex, the characters
+otherwise — and the echo line says which, since `de ad` is two bytes one way and
+five the other.
+
+So hex copied out of one file pastes into another as the same bytes, and text
+copied from a buffer pastes as its characters.
+
+### Searching — `C-s` / `C-r`
+
+`C-s` asks once and then repeats:
+
+```
+de ad be ef   deadbeef   0xDE,0xAD      those four bytes
+"GET /"       'ELF'                     the characters between the quotes
+hello                                   those characters too
+```
+
+A bare `cafe` is both at once, and is read as hex — this is a hex editor, and
+the quotes are there to say otherwise. So is `AAAA`, which is `aa aa`; put it in
+quotes to look for the letters. Either way the echo line reports which it was
+and how many bytes it came to, so it is never a guess.
+
+The match is highlighted and the cursor lands on it; `C-s` again finds the next
+one, `C-r` the previous, and the search wraps round the end of the file and says
+it did. `M-s` (or `M-r`) asks for a different pattern, with the last one already
+at the prompt so a typo is an edit rather than a retype; `C-g` ends the search,
+and so does a search that fails, after which `C-s` asks again too.
+
+### Saving
+
+`C-x C-s` writes the bytes back, and `C-x C-w` writes them out under another
+name. Everything that guards a text file guards this one too: a file that
+changed on disk underneath the buffer is never overwritten without the question
+first, `C-x C-c` asks about unsaved bytes, and `M-x revert-buffer` re-reads the
+file.
+
+The modeline reads a hex buffer the way it reads a text one, with offsets in
+place of line and column:
+
+```
+ ** elf.so  (hex)  00000020/00012a40  40 ovw   C-s find  C-x C-s save  ? help
+```
+
+`--` / `**` / `%%` for writable, modified and read-only; the offset of the
+cursor and the length of the file; the byte under the cursor; `ovw` or `ins`.
+
+### Forcing it either way
+
+`M-x hex-mode` (`M-x hexl-mode` works too) shows the file the current buffer is
+visiting as hex, whether or not it is binary — useful for looking at the line
+endings or the BOM in something that *is* text. `M-x hex-mode-exit` goes back.
+Both refuse while the buffer has unsaved changes, rather than choosing for you
+which copy to keep.
+
+### What it will not do
+
+A hex buffer holds the whole file in memory, because searching and editing both
+want it at once. A file over 256 MB is therefore turned down with a message
+rather than opened as something that could not then be edited or saved.
+
+Some hex buffers have nowhere to be written back to and open read-only: a binary
+member of an archive, and a `.gz` holding something that is not text (ccm writes
+text back through the compressor, not bytes). `C-x C-w` is the way out of both —
+it writes the bytes to a file of their own, and the buffer stops being
+read-only.
+
+A `.tar.gz` is still offered to the browser rather than shown as hex: it is
+somewhere to go, and a hex dump of a tar header is nobody's answer.
+
+## Compressed files — `.gz`, `.bz2`, `.xz`
+
+A compressed file opens as the text inside it. `ccm notes.txt.gz` shows
+`notes.txt`, and `C-x C-s` writes the compressed bytes back, so the file on disk
+is never left uncompressed under a name that says it is. This is Emacs'
+`jka-compr` behaviour.
+
+Only gzip round-trips. `.bz2` and `.xz` open read-only, because a format ccm can
+read but not write cannot round-trip, and a buffer that looks editable but
+cannot be saved is worse than one that says so. `C-x C-w` writes the text out to
+a name of your choosing, and the buffer becomes an ordinary editable one.
+
+The modeline shows both facts: `--` / `**` / `%%` for writable, modified and
+read-only, and the format next to the language — `prog.c.gz` reads
+`(c, gzip)`.
+
+### Two things to know
+
+The language comes from the name *under* the extension, exactly as for an
+encrypted file: `prog.c.gz` colours as C, `config.json.gz` as JSON. A bare
+`archive.gz` has no name underneath, so it keeps its own.
+
+A `.gz` whose contents are not text — a tarball, most often — will not load.
+The editor holds a C string, so a NUL byte in the content would end the text
+early and saving it back would write a *shorter* file than was opened,
+destroying everything past that byte. Rather than risk that, such a file opens
+empty and read-only, and says to browse it as an archive instead.
+
+A name that does not exist yet is a new file, not a broken one: `ccm new.txt.gz`
+comes up as an empty buffer that compresses on its first save.
+
+## Archives — `.zip`, `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`
+
+An archive is browsed as a directory rather than read as a file. `ccm src.zip`,
+`C-x C-f` onto one, or moving onto one in the `C-x d` browser all step *into*
+it:
+
+- **Enter** on a folder descends into it.
+- **Enter** on a file opens it in a read-only buffer, named
+  `<archive>!<member>`.
+- **`..`** climbs back up, and at the archive's root leaves the archive for the
+  directory it sits in.
+- **`C-x C-w`** writes the member out to a real file — the offered name is the
+  member's own base name — and that buffer becomes editable.
+
+`C-x C-s` on a member refuses: ccm reads archives and does not rewrite them, so
+there is nothing a save could do but mislead.
+
+### How it works, and what follows from it
+
+Nothing is unpacked to disk. A member goes from the archive straight into the
+buffer, so no temporary file is left behind if ccm is killed, and an archive is
+never partly unpacked somewhere you did not ask for.
+
+A zip has an index — the central directory at the end names every member and
+where its bytes are — so the file is read once and each member is inflated on
+demand. A tar has none: it is a stream of headers each followed by its data, and
+when it is compressed there is no seeking into it, so a tarball is decompressed
+whole into memory once and the listing points into that. One archive is cached
+at a time; entering another drops the previous one, which is also how a second
+visit re-reads a file that changed in between.
+
+Archives are flat lists of paths, and plenty of them name no directories at all
+(a zip may hold `src/main.c` with no `src/` entry). The folders in the listing
+are synthesised from the paths, so the tree is the same either way.
+
+Two limits are deliberate and reported rather than worked around: zip64 archives
+are refused, since listing a wrong subset of a 5GB file as though it were all of
+it is worse than saying no; and an archive over 512MB is refused rather than
+pulled into memory.
 
 ## Languages — VSCode-style extensions
 

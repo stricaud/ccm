@@ -1,4 +1,5 @@
 #include "cacamacs.h"
+#include "hex.h"
 /* ── modeline ──────────────────────────────────────────────────────────────── */
 
 /* Fit a path/name into the modeline without letting it swallow the whole bar
@@ -67,19 +68,42 @@ static void refold_if_edited(gtcaca_editor_widget_t *ed)
 void refresh_modeline(gtcaca_editor_widget_t *ed, void *ud)
 {
   char text[512], namebuf[128];
+  int hexbuf = buf_index_of(ed);
   int line = gtcaca_editor_get_current_line(ed) + 1;
   int col  = gtcaca_editor_get_column(ed, gtcaca_editor_get_current_pos(ed)) + 1;
   /* Budget the name to a third of the bar (clamped), leaving the rest for the
      language, position and the command hints. */
   int w = caca_get_canvas_width(gmo.cv), budget = w / 3;
   const char *name;
-  const char *mod  = gtcaca_editor_get_modify(ed) ? "**" : "--";
+  /* Emacs' own three: ** modified, %% read-only, -- neither. A compressed file
+     ccm can only read, and an archive member, are both read-only, and that is
+     worth seeing all the time rather than in a message that scrolls away. */
+  const char *mod  = gtcaca_editor_get_read_only(ed) ? "%%"
+                   : gtcaca_editor_get_modify(ed)    ? "**" : "--";
+  /* "(c)" for prog.c, "(c, gzip)" for prog.c.gz: the language is what the text
+     is, the format is how the file holds it. */
+  char lang[96];
+  { int bi = buf_index_of(ed);
+    const char *fmt = (bi >= 0 && g_buffers[bi].comp) ? ccm_comp_name(g_buffers[bi].comp) : NULL;
+    if (bi >= 0 && g_buffers[bi].arc_member) fmt = "in archive";
+    if (fmt) snprintf(lang, sizeof lang, "%s, %s", g_langname, fmt);
+    else     snprintf(lang, sizeof lang, "%s", g_langname); }
 
   if (budget < 12) budget = 12;
   if (budget > 40) budget = 40;
   name = compact_path(g_filename ? g_filename : "*scratch*", namebuf, sizeof namebuf, budget);
 
   (void)ud;
+  /* A hex buffer has no lines and no language — offsets and the byte under the
+     cursor — and has a bar of its own to say so (hex.c). Everything above was
+     read off the empty editor widget it keeps out of sight, and means nothing
+     about it; the one thing that still applies is the question about a file
+     that changed on disk. */
+  if (hexbuf >= 0 && g_buffers[hexbuf].hex) {
+    ccm_check_supersession(ed);
+    ccm_hex_modeline(hexbuf);
+    return;
+  }
   /* The widget calls this after every key it has handled, which makes it the
      one place that sees a buffer go from unmodified to modified — where Emacs
      asks about a file that changed on disk underneath it. Before the text is
@@ -97,10 +121,10 @@ void refresh_modeline(gtcaca_editor_widget_t *ed, void *ud)
     return;
   }
   if (g_message[0])
-    snprintf(text, sizeof(text), " %s %s  (%s)  L%d C%d   %s", mod, name, g_langname, line, col, g_message);
+    snprintf(text, sizeof(text), " %s %s  (%s)  L%d C%d   %s", mod, name, lang, line, col, g_message);
   else
     snprintf(text, sizeof(text), " %s %s  (%s)  L%d C%d   C-x C-s save  C-x C-c quit  C-g cancel",
-             mod, name, g_langname, line, col);
+             mod, name, lang, line, col);
 
   gtcaca_statusbar_set_text(g_modeline, text);
 }

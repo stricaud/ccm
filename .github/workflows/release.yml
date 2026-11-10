@@ -59,6 +59,7 @@ jobs:
           pacboy: >-
             toolchain:p cmake:p ninja:p
             libcaca:p oniguruma:p
+            zlib:p bzip2:p xz:p
           install: zip
 
       - name: Checkout ccm
@@ -78,13 +79,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config patchelf \
-            libcaca-dev libonig-dev
+            libcaca-dev libonig-dev \
+            zlib1g-dev libbz2-dev liblzma-dev
 
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
         run: |
           brew update
-          brew install cmake pkg-config libcaca oniguruma
+          # zlib and bzip2 come with the macOS SDK; xz does not.
+          brew install cmake pkg-config libcaca oniguruma xz
 
       - name: Build & bundle (Linux/macOS)
         if: runner.os != 'Windows'

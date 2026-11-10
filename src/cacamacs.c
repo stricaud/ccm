@@ -33,6 +33,8 @@
  *   View   : C-x l line numbers   C-x f folding mode   C-x t toggle fold
  *            C-x a toggle annotation on the current line
  *   Files  : C-x d open the file browser (navigate the current directory)
+ *   Binary : a file with a NUL byte in it opens as hex + ASCII and is edited as
+ *            bytes (hex.c); ? inside the mode lists its keys.
  *   JSON   : .json/.jsonl open in JSON mode (colour + fold).
  *   Pretty : C-x p pretty-prints JSON or XML (auto-detected) — the selection,
  *            else the whole buffer if it is one document, else the current line.
@@ -40,6 +42,7 @@
  */
 
 #include "cacamacs.h"
+#include "hex.h"
 #include <getopt.h>   /* getopt_long — POSIX systems and mingw-w64 alike */
 #include <errno.h>    /* strerror, for --configure's failure messages */
 
@@ -305,6 +308,15 @@ static void usage(FILE *out)
     "                   \"logFiles\": true also records every file opened and\n"
     "                   written to files.log in the same directory;\n"
     "                   \"gpg-program\" names the binary -k runs (default gpg)\n"
+    "\n"
+    "Compressed files and archives\n"
+    "  A .gz is opened as the text inside it and saved back compressed, so\n"
+    "  `ccm notes.txt.gz` edits notes.txt in place; the language comes from the\n"
+    "  name under the .gz. A .bz2 or .xz opens the same way but read-only,\n"
+    "  since ccm only writes gzip.\n"
+    "  A .zip or .tar (plain, .gz, .bz2 or .xz) is browsed as a directory:\n"
+    "  `ccm src.zip` lists it, Enter descends, and a file inside it opens\n"
+    "  read-only. C-x C-w writes a member out to a file you can edit.\n"
     "  extensions/      VSCode-style grammars driving syntax colourization\n"
     "\n"
     "Inside the editor, M-x help lists every key binding.\n",
@@ -328,6 +340,7 @@ int main(int argc, char **argv)
   int cw, ch, i, b0, c, selftest = 0;
   const char *arg = NULL;
   const char *open_file_path = NULL;
+  const char *open_arc = NULL;          /* `ccm file.zip`: browse it, don't read it */
   const char *crypt_key = NULL;      /* -k: "" = ask, otherwise the key given */
   int open_dir = 0;
   long goto_line_arg = 0;
@@ -392,6 +405,9 @@ int main(int argc, char **argv)
   if (arg) {
     struct stat st;
     if (stat(arg, &st) == 0 && S_ISDIR(st.st_mode)) open_dir = 1;
+    /* `ccm archive.zip` browses it, the same as `ccm somedir` does: an archive
+       is a place with files in it, so there is nothing to put in a buffer. */
+    else if (ccm_is_archive(arg)) { open_dir = 1; open_arc = arg; }
     else open_file_path = arg;
   }
 
@@ -490,8 +506,17 @@ int main(int argc, char **argv)
   }
 
   if (open_dir) {
-    if (!ccm_realpath(arg, g_curdir)) { strncpy(g_curdir, arg, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
-    show_browser();
+    if (open_arc) {
+      char abs[PATH_MAX];
+      ccm_abs_path(open_arc, abs, sizeof abs);
+      show_browser();
+      /* Refused (an unreadable or zip64 archive)? browse_archive has said why,
+         and the listing behind it is still the directory it sits in. */
+      browse_archive(abs);
+    } else {
+      if (!ccm_realpath(arg, g_curdir)) { strncpy(g_curdir, arg, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0'; }
+      show_browser();
+    }
   }
 
   /* The passphrase and the key are asked for in the minibuffer, which is only
@@ -513,6 +538,8 @@ int main(int argc, char **argv)
      symmetric saves need it again, but nothing after this does. */
   for (i = 0; i < g_nbuf; i++) ccm_wipe(g_buffers[i].crypt_pass, sizeof g_buffers[i].crypt_pass);
   for (i = 0; i < g_nbuf; i++) {
+    /* A hex buffer holds the file's bytes, which are its document. */
+    if (g_buffers[i].hex) ccm_hex_close(i);
     /* A view borrows its language config from the buffer it was split from
        (see buffer_create_view): freeing it here as well would free it twice. */
     if (g_buffers[i].is_view) continue;

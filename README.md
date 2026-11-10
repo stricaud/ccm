@@ -114,6 +114,59 @@ first keystroke, `… has changed since visited or saved.  Save anyway?` on
 purpose. See
 [docs/README-cacamacs.md](docs/README-cacamacs.md#when-the-file-changes-on-disk).
 
+## Binary files — hex mode
+
+A file with a NUL byte in it is not text, so cacamacs shows it as bytes:
+
+```
+00000000  7f 45 4c 46 02 01 01 00  00 00 00 00 00 00 00 00  |.ELF............|
+00000010  03 00 3e 00 01 00 00 00  40 1c 00 00 00 00 00 00  |..>.....@.......|
+```
+
+The hex is on the left, the ASCII on the right, and the bytes are what you
+edit and save — the gtcaca `hexview` widget in an ordinary ccm buffer, so
+`C-x o`, `C-x b` and the rest work there as anywhere else.
+
+`0`–`9` and `a`–`f` type over the byte under the cursor, a nibble at a time;
+`Tab` crosses to the ASCII side, where any character types that byte. `Insert`
+switches to inserting rather than overwriting, `C-o` puts a `00` at the cursor
+and `M-o` appends one at the end, `C-d` and `Backspace` take one out, and `C-_`
+undoes. Bytes you have changed stay marked in red until the buffer is saved.
+
+`C-s` searches, for bytes or for text — `de ad be ef`, `deadbeef` and
+`0xDE,0xAD` all mean those bytes, `"GET /"` means those characters, and a word
+that is not all hex digits means its characters too; the echo line says which it
+read, and `C-s` again finds the next one while `M-s` asks for a different
+pattern. `M-g` goes to an offset (hex, or `#1024` for decimal), `C-u N` repeats
+a key N times, and `C-x (` … `C-x )` … `C-x e` records and replays a macro over
+the bytes. `C-x C-s` writes the file back, `C-x C-w` writes the bytes out under
+another name, and `?` lists every key.
+
+Any file can be shown this way with `M-x hex-mode`, and `M-x hex-mode-exit`
+goes back to text. A binary member of an archive, and a `.gz` holding
+something that is not text, open as hex read-only — `C-x C-w` gets the bytes
+out to a file of their own. ccm holds a hex buffer in memory, so a file over
+256 MB is turned down rather than opened.
+
+## Compressed files and archives
+
+A `.gz` is opened as the text inside it and saved back compressed, the way
+Emacs' `jka-compr` does — `ccm notes.txt.gz` edits `notes.txt` in place, and the
+syntax highlighting comes from the name under the `.gz` (`prog.c.gz` colours as
+C). `.bz2` and `.xz` open the same way but read-only, since ccm only writes
+gzip; `C-x C-w` writes one out to a file you can edit.
+
+A `.zip` or a `.tar` (plain, `.gz`, `.bz2` or `.xz`) is browsed as a directory
+instead: `ccm src.zip`, `C-x C-f` onto one, or walking onto one in `C-x d` steps
+*into* it. Enter descends into a folder, Enter on a file opens it read-only, and
+`..` at the top comes back out. Nothing is unpacked to disk — a member goes from
+the archive straight into the buffer — and ccm does not rewrite archives, so
+`C-x C-w` is how you get a member out to work on.
+
+Each format sits behind its own library, all three optional at build time: zlib
+for `.gz` and `.zip`, libbz2 for `.bz2`, liblzma for `.xz`. A build missing one
+says so when a file asks for that format.
+
 ## Markdown
 
 `M-x md-` then Tab lists a set of helpers for writing prose — `md-title` and

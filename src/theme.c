@@ -296,6 +296,18 @@ void ccm_theme_show_warning(void)
 }
 
 /* run before any editors are created: tints the shared editor surface (ANSI) */
+/* The theme's foreground and background as two of the sixteen ANSI colours,
+   for a widget that can hold nothing richer — the hexview paints with
+   caca_set_color_ansi, so a hex dump takes the nearest colour rather than the
+   exact RGB a text buffer gets. 0 when there is no theme to apply. */
+int ccm_theme_ansi(int *fg, int *bg)
+{
+  if (!T.loaded) return 0;
+  if (fg && T.fg.set) *fg = T.fg.a;
+  if (bg && T.bg.set) *bg = T.bg.a;
+  return (T.fg.set || T.bg.set) ? 1 : 0;
+}
+
 void ccm_theme_apply_global(void)
 {
   if (!T.loaded) return;

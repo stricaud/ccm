@@ -21,6 +21,7 @@
  */
 
 #include "cacamacs.h"
+#include "hex.h"
 
 int g_super_active = 0;       /* the y/n/r question is up */
 static int g_super_buf  = -1; /* … about this buffer */
@@ -92,7 +93,19 @@ void ccm_revert_buffer(int bi)
   if (bi < 0 || bi >= g_nbuf) return;
   b = &g_buffers[bi];
   if (!b->has_file) { snprintf(g_message, sizeof g_message, "Buffer does not seem to be associated with any file"); return; }
-  c = read_file(b->path);
+  /* A hex buffer comes back as bytes, not as text — reading the file into the
+     editor would replace a binary with however much of it fits in a string. */
+  if (b->hex) { ccm_hex_revert(bi); return; }
+  if (b->arc_member) { snprintf(g_message, sizeof g_message, "%s came out of an archive — reopen the archive to re-read it", ccm_base_name(b->path)); return; }
+  /* A compressed file has to come back through the decompressor, or reverting
+     would replace the text with the bytes it was stored as. */
+  if (b->comp) {
+    char err[256] = "";
+    c = ccm_comp_read_file(b->path, b->comp, NULL, err, sizeof err);
+    if (!c) { snprintf(g_message, sizeof g_message, "Cannot read %s: %s", ccm_base_name(b->path), err[0] ? err : "decompression failed"); return; }
+  } else {
+    c = read_file(b->path);
+  }
   if (!c) { snprintf(g_message, sizeof g_message, "Cannot read %s", b->path); return; }
 
   pos = gtcaca_editor_get_current_pos(b->ed);
@@ -145,7 +158,8 @@ void ccm_check_supersession(gtcaca_editor_widget_t *ed)
   bi = buf_index_of(ed);
   if (bi < 0) return;
   b = &g_buffers[bi];
-  now = gtcaca_editor_get_modify(ed) ? 1 : 0;
+  /* A hex buffer's edits are in its bytes; its editor is never touched. */
+  now = (b->hex ? ccm_hex_modified(bi) : gtcaca_editor_get_modify(ed)) ? 1 : 0;
 
   if (now && !b->was_modified && !g_super_active && b->has_file && ccm_buffer_stale(bi)) {
     g_super_active = 1; g_super_buf = bi; g_super_help = 0;
@@ -179,8 +193,12 @@ int supersession_key(int key)
   case CACA_KEY_CTRL_G:
   case CACA_KEY_ESCAPE:
     super_done();                   /* abort: take the change back out again */
-    gtcaca_editor_undo(ed);
-    gtcaca_editor_set_save_point(ed);
+    if (g_buffers[bi].hex) {
+      ccm_hex_undo(bi);             /* the byte that was typed over */
+    } else {
+      gtcaca_editor_undo(ed);
+      gtcaca_editor_set_save_point(ed);
+    }
     g_buffers[bi].was_modified = 0;
     snprintf(g_message, sizeof g_message, "File changed on disk: %s", g_buffers[bi].path);
     break;
@@ -224,7 +242,8 @@ static void ask_reread(const char *lead)
   buffer_t *b = &g_buffers[g_ask_buf];
   snprintf(prompt, sizeof prompt, "%sFile %s changed on disk.  %s (yes or no) ",
            lead, ccm_base_name(b->path),
-           gtcaca_editor_get_modify(b->ed) ? "Discard your edits?" : "Reread from disk?");
+           (b->hex ? ccm_hex_modified(g_ask_buf) : gtcaca_editor_get_modify(b->ed))
+             ? "Discard your edits?" : "Reread from disk?");
   start_minibuffer(prompt, reread_done);
 }
 

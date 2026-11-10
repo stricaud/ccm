@@ -1,4 +1,5 @@
 #include "cacamacs.h"
+#include "hex.h"
 /* ── file browser (open a directory to navigate it) ────────────────────────── */
 
 typedef struct { char name[256]; int isdir; } bent_t;
@@ -25,6 +26,11 @@ static int entry_is_dir(const char *dir, const struct dirent *de)
   need = snprintf(p, sizeof p, "%s/%s", dir, de->d_name);
   return (need > 0 && need < (int)sizeof p && stat(p, &st) == 0) ? S_ISDIR(st.st_mode) : 0;
 }
+
+/* Where the browser is: a real directory, or inside the archive archive.c has
+   cached. g_arcsub is how deep inside ("" at its root). See populate_archive. */
+static int  g_in_arc = 0;
+static char g_arcsub[PATH_MAX] = "";
 
 /* Render the directory listing into the read-only browser editor. */
 void populate_browser(const char *dir)
@@ -74,9 +80,99 @@ void populate_browser(const char *dir)
   gtcaca_editor_goto_pos(g_browser_ed, 0);
   free(listing);
 
+  g_in_arc = 0;                 /* a real directory: out of any archive */
   g_browser_win->window_title = g_curdir;
   if (!d) snprintf(g_message, sizeof g_message, "Cannot read %s", dir);
   else    snprintf(g_message, sizeof g_message, "%d item%s", n, n == 1 ? "" : "s");
+  /* The status bar is shared with the editor behind us, and whoever wrote it
+     last wins — so the listing refreshes it rather than leaving the bar
+     describing a buffer that is not on screen, or a directory we have since
+     left for an archive. */
+  browser_modeline(g_browser_ed, NULL);
+}
+
+/* ── the browser inside an archive ────────────────────────────────────────────
+ *
+ * The listing is the same read-only editor; only where the names come from
+ * changes. `g_in_arc` says which, and `g_arcsub` is how deep we are inside the
+ * archive ("" at its root) — the archive itself is whichever one archive.c has
+ * cached, so there is one piece of state and no way for the two to disagree.
+ *
+ * A member is addressed as "<archive>!<member>" once it is in a buffer. That is
+ * not a path anything can open, which is the point: the buffer carries
+ * arc_member and never writes.
+ */
+void populate_archive(const char *sub)
+{
+  ccm_arc_child_t *kids = NULL;
+  char *listing;
+  int nk = 0, i, total;
+  size_t len;
+
+  if (sub != g_arcsub) {
+    strncpy(g_arcsub, sub ? sub : "", sizeof g_arcsub - 1);
+    g_arcsub[sizeof g_arcsub - 1] = '\0';
+  }
+  g_in_arc = 1;
+
+  if (ccm_archive_children(g_arcsub, &kids, &nk) != 0) {
+    snprintf(g_message, sizeof g_message, "No archive is open");
+    g_in_arc = 0;
+    return;
+  }
+
+  total = 3;  /* "../" */
+  for (i = 0; i < nk; i++) total += 1 + (int)strlen(kids[i].name) + (kids[i].isdir ? 1 : 0);
+  listing = malloc((size_t)total + 1);
+  if (!listing) { free(kids); return; }
+  strcpy(listing, "../"); len = 3;
+  for (i = 0; i < nk; i++) {
+    listing[len++] = '\n';
+    strcpy(listing + len, kids[i].name); len += strlen(kids[i].name);
+    if (kids[i].isdir) listing[len++] = '/';
+  }
+  listing[len] = '\0';
+
+  gtcaca_editor_set_read_only(g_browser_ed, 0);
+  gtcaca_editor_set_text(g_browser_ed, listing);
+  gtcaca_editor_set_read_only(g_browser_ed, 1);
+  gtcaca_editor_goto_pos(g_browser_ed, 0);
+  free(listing);
+
+  /* The window title is the one place the whole location fits, so it carries
+     the archive and the path inside it; g_curdir still names the directory the
+     archive sits in, which is where ".." at the root goes back to. */
+  { static char title[PATH_MAX + 64];
+    snprintf(title, sizeof title, "%s!/%s", ccm_archive_path(), g_arcsub);
+    g_browser_win->window_title = title; }
+
+  snprintf(g_message, sizeof g_message, "%d item%s (read-only, inside %s)",
+           nk, nk == 1 ? "" : "s", ccm_base_name(ccm_archive_path()));
+  browser_modeline(g_browser_ed, NULL);
+  free(kids);
+}
+
+/* Step into `path` as an archive and show its root. 0 if we did. */
+int browse_archive(const char *path)
+{
+  char err[256] = "";
+  if (ccm_archive_enter(path, err, sizeof err) != 0) {
+    snprintf(g_message, sizeof g_message, "%s", err[0] ? err : "cannot read that archive");
+    /* The listing behind us was drawn before this failed, and its "N items"
+       went to the bar with it; without this the refusal never appears. */
+    browser_modeline(g_browser_ed, NULL);
+    return -1;
+  }
+  /* Where ".." at the archive root returns to. */
+  { char dir[PATH_MAX]; const char *slash = strrchr(path, '/');
+    if (slash && slash != path) {
+      size_t n = (size_t)(slash - path);
+      if (n >= sizeof dir) n = sizeof dir - 1;
+      memcpy(dir, path, n); dir[n] = '\0';
+      strncpy(g_curdir, dir, sizeof g_curdir - 1); g_curdir[sizeof g_curdir - 1] = '\0';
+    } }
+  populate_archive("");
+  return 0;
 }
 
 static int g_browser_open = 0;
@@ -104,10 +200,10 @@ void show_browser(void)
   pane_hide_all();                 /* modal: only the browser is visible */
   gtcaca_widget_show(GTCACA_WIDGET(g_browser_win));
   gtcaca_widget_show(GTCACA_WIDGET(g_browser_ed));
+  g_browser_open = 1;           /* before the listing: browser_modeline checks it */
   populate_browser(g_curdir);
   gtcaca_window_set_focus(g_browser_win);
   gtcaca_window_set_focused_child(g_browser_win, GTCACA_WIDGET(g_browser_ed));
-  g_browser_open = 1;
 }
 
 void hide_browser(void)
@@ -155,6 +251,11 @@ const char *help_text(void)
   "         C-x b switches buffer, C-x d re-reads it\n"
   "         a name can be lifted out of it like any other text: C-space (or\n"
   "         M-x set-mark), C-e, M-w — then q and C-y where you want it\n"
+  "Packed   a .gz opens as its text and saves back compressed; .bz2 and .xz\n"
+  "         open read-only (ccm only writes gzip)\n"
+  "         a .zip or .tar[.gz|.bz2|.xz] opens as a folder to walk: Enter\n"
+  "         descends, Enter on a file shows it read-only, .. at the top comes\n"
+  "         back out — C-x C-w writes a member out to a file you can edit\n"
   "         a file changed by someone else is never overwritten or discarded\n"
   "         silently: editing, saving or re-opening it asks first\n"
   "         the prompt starts in the current file's directory: type a name or\n"
@@ -182,6 +283,12 @@ const char *help_text(void)
   "         md-github-table  the GFM pipe form — GitHub draws it, pandoc\n"
   "         drops the <br> fold it needs\n"
   "         md-table-row  md-table-col  md-table-align  (either shape)\n"
+  "Binary   a file with a NUL byte in it opens as hex with the ASCII beside it,\n"
+  "         and the bytes are what you edit and save — 0-9 a-f type over the\n"
+  "         byte, Tab crosses to the ASCII side, C-s searches for bytes\n"
+  "         (de ad be ef) or for text (\"GET /\"), M-g goes to an offset, and\n"
+  "         C-x C-s writes the file back. ? inside the mode lists every key.\n"
+  "         M-x hex-mode shows any file that way; M-x hex-mode-exit goes back\n"
   "Diagram  M-x diagram  draw an ASCII diagram and drop it in at the cursor\n"
   "         (select existing art first to edit it; q inserts, then C-x C-s)\n"
   "         shapes, links, an eraser — ? inside the mode lists every key\n"
@@ -356,7 +463,124 @@ void completions_pick_at_point(void)
   else                      minibuffer_replace_tail(pick);
 }
 
-/* Open whatever entry the caret is on: descend into a directory, or open a file. */
+/* Open one member of the cached archive into a read-only buffer.
+ *
+ * The bytes go from the archive straight into the editor, so nothing is
+ * unpacked to disk. The buffer's name is "<archive>!<member>", which no
+ * filesystem call will ever resolve — deliberately, since the buffer must not
+ * be writable: arc_member makes write_buffer_file refuse, and the editor is set
+ * read-only so it never comes up. The name still ends in the member's own
+ * extension, which is what gives it the right language. */
+static void open_archive_member(const char *member)
+{
+  char err[256] = "", pseudo[PATH_MAX];
+  char *text;
+  size_t len = 0;
+  int bi, need;
+
+  text = ccm_archive_extract(member, &len, err, sizeof err);
+  if (!text) {
+    snprintf(g_message, sizeof g_message, "%s", err[0] ? err : "cannot read that member");
+    return;
+  }
+  /* A member may be compressed in its own right — doc/changelog.gz inside a
+     package is the everyday case — and what the archive hands back is then
+     still the compressed bytes. Peel that layer too, so it reads as text like
+     the same file would outside the archive. If it will not decompress, keep
+     the bytes and let the text check below turn it down. */
+  { int mfmt = ccm_comp_format(member);
+    if (mfmt != CCM_COMP_NONE && ccm_comp_supported(mfmt)) {
+      size_t dlen = 0;
+      char *inner = ccm_comp_read_mem(text, len, mfmt, &dlen, err, sizeof err);
+      if (inner) { free(text); text = inner; len = dlen; }
+    } }
+  need = snprintf(pseudo, sizeof pseudo, "%s!%s", ccm_archive_path(), member);
+  if (need < 0 || need >= (int)sizeof pseudo) {
+    free(text);
+    snprintf(g_message, sizeof g_message, "Name too long");
+    return;
+  }
+
+  /* There is no file at that name, so the buffer comes up empty and we fill it;
+     the language was already set from the extension on the way through. */
+  bi = buffer_create(pseudo);
+  if (bi < 0) { free(text); snprintf(g_message, sizeof g_message, "Too many buffers"); return; }
+  g_buffers[bi].arc_member = 1;
+  /* A member called `changelog.gz` would have had buffer_create take the name
+     for a compressed file (it found nothing at it, so the buffer is simply
+     empty). It is a member, and the archive has already decompressed it. */
+  g_buffers[bi].comp = CCM_COMP_NONE;
+  g_buffers[bi].comp_ro = 0;
+  g_buffers[bi].comp_note[0] = '\0';
+  if (!ccm_is_text(text, len)) {
+    /* An icon, a .so, a font: bytes, so the member is shown as bytes. It used
+       to be turned away with "holds binary data, not text", which left no way
+       to look inside an archive at the very files you open an archive for.
+       Read-only like every member, and ccm_hex_adopt takes the block over. */
+    if (ccm_hex_adopt(bi, (uint8_t *)text, (long)len, 1, NULL) != 0) return;
+  } else {
+    gtcaca_editor_set_read_only(g_buffers[bi].ed, 0);
+    gtcaca_editor_set_text(g_buffers[bi].ed, text);
+    gtcaca_editor_empty_undo_buffer(g_buffers[bi].ed);
+    gtcaca_editor_set_save_point(g_buffers[bi].ed);
+    gtcaca_editor_set_read_only(g_buffers[bi].ed, 1);
+    free(text);
+  }
+
+  /* Before focus_pane, not after: focus_pane refreshes the modeline, and a
+     message set afterwards would not appear until the next keystroke. */
+  snprintf(g_message, sizeof g_message, "%s (read-only, inside %s)",
+           member, ccm_base_name(ccm_archive_path()));
+  hide_browser();
+  pane_show_buffer(g_focus_leaf, bi);
+  relayout();
+  focus_pane(g_focus_leaf);
+}
+
+/* Enter on an entry while the listing is showing the inside of an archive. */
+static void archive_open_current(const char *entry)
+{
+  char sub[PATH_MAX];
+  int need;
+
+  if (!strcmp(entry, "../")) {
+    /* At the root this leaves the archive for the directory holding it; the
+       cached archive goes with it, so a second visit re-reads a file that may
+       have changed in the meantime. */
+    if (!g_arcsub[0]) {
+      char dir[PATH_MAX];
+      snprintf(dir, sizeof dir, "%s", g_curdir);
+      ccm_archive_close();
+      g_in_arc = 0;
+      populate_browser(dir);
+      return;
+    }
+    { char *slash = strrchr(g_arcsub, '/');
+      if (slash) *slash = '\0';
+      else g_arcsub[0] = '\0'; }
+    populate_archive(g_arcsub);
+    return;
+  }
+
+  { size_t l = strlen(entry);
+    int isdir = (l && entry[l - 1] == '/');
+    char name[NAME_MAX + 2];
+    snprintf(name, sizeof name, "%s", entry);
+    if (isdir) name[strlen(name) - 1] = '\0';
+
+    need = g_arcsub[0] ? snprintf(sub, sizeof sub, "%s/%s", g_arcsub, name)
+                       : snprintf(sub, sizeof sub, "%s", name);
+    if (need < 0 || need >= (int)sizeof sub) {
+      snprintf(g_message, sizeof g_message, "Name too long");
+      return;
+    }
+    if (isdir) populate_archive(sub);
+    else       open_archive_member(sub);
+  }
+}
+
+/* Open whatever entry the caret is on: descend into a directory or an archive,
+   or open a file. */
 void browser_open_current(void)
 {
   gtcaca_editor_widget_t *ed = g_browser_ed;
@@ -370,6 +594,9 @@ void browser_open_current(void)
 
   gtcaca_editor_get_text_range(ed, s, e, entry, sizeof entry);
   if (entry[0] == '\0') return;
+
+  if (g_in_arc) { archive_open_current(entry); return; }
+
   if (!strcmp(entry, "../")) need = snprintf(path, sizeof path, "%s/..", g_curdir);
   else {
     l = strlen(entry); if (l && entry[l - 1] == '/') entry[l - 1] = '\0';
@@ -377,6 +604,9 @@ void browser_open_current(void)
   }
   if (need < 0 || need >= (int)sizeof path) { snprintf(g_message, sizeof g_message, "Path too long"); return; }
   if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) populate_browser(path);
+  /* A .zip or .tar.gz is a directory as far as the browser is concerned: step
+     into it rather than opening the container as text. */
+  else if (ccm_is_archive(path))                   browse_archive(path);
   else                                             open_path_in_editor(path);
 }
 
@@ -390,9 +620,23 @@ void browser_modeline(gtcaca_editor_widget_t *ed, void *ud)
   int w = caca_get_canvas_width(gmo.cv), budget = w / 2;
   const char *dir;
   (void)ed; (void)ud;
+  /* gtcaca calls this after every key the browser's editor has handled — which
+     includes the Enter that just closed the browser to open a file. Writing the
+     bar then would bury the modeline focus_pane has only now set for the file,
+     so the browser stops claiming the bar the moment it is no longer in front. */
+  if (!g_browser_open) return;
   if (budget < 16) budget = 16;
   if (budget > 60) budget = 60;
-  dir = compact_path(g_curdir, dirbuf, sizeof dirbuf, budget);
+  /* Inside an archive the location is the archive plus how deep we are in it —
+     g_curdir only names the directory the archive sits in, which is where ".."
+     eventually leads but not where the listing is. */
+  if (g_in_arc) {
+    char where[PATH_MAX + 64];
+    snprintf(where, sizeof where, "%s!/%s", ccm_base_name(ccm_archive_path()), g_arcsub);
+    dir = compact_path(where, dirbuf, sizeof dirbuf, budget);
+  } else {
+    dir = compact_path(g_curdir, dirbuf, sizeof dirbuf, budget);
+  }
   if (g_message[0]) snprintf(t, sizeof t, "  Browser  %s   %s", dir, g_message);
   else snprintf(t, sizeof t, "  Browser  %s   arrows move  C-s search  Enter open  q quit", dir);
   gtcaca_statusbar_set_text(g_modeline, t);
@@ -473,6 +717,21 @@ int buffer_create(const char *path)
          buffer starts empty and read-only and ccm_crypt_begin takes it from
          there — see crypt.c. */
       ccm_crypt_lock(bi);
+    } else if (ccm_comp_format(path) != CCM_COMP_NONE) {
+      /* .gz and friends: the buffer gets the text, not the compressed bytes,
+         and a save puts the bytes back (compress.c). An archive never reaches
+         here — open_path_in_editor sends those to the browser instead. */
+      ccm_comp_open(bi, ccm_comp_format(path));
+    } else if (ccm_file_is_binary(path)) {
+      /* A NUL byte is the end of a C string, so the editor cannot hold this
+         file: it would come up empty from the first NUL on, and saving it
+         would write that emptiness back. It opens as bytes instead — hex with
+         the ASCII beside it, which is also something you can edit (hex.c).
+         If even that will not have it (too large to hold), the buffer comes up
+         empty and the reason has to survive setup_language's own message,
+         which is what comp_note is for. */
+      if (ccm_hex_open_file(bi, 0, NULL) != 0)
+        snprintf(b->comp_note, sizeof b->comp_note, "%s", g_message);
     } else {
       char *c = read_file(path);
       gtcaca_editor_set_text(b->ed, c ? c : ""); free(c);
@@ -487,7 +746,8 @@ int buffer_create(const char *path)
   gtcaca_editor_empty_undo_buffer(b->ed);
   gtcaca_editor_set_save_point(b->ed);
 
-  if (b->has_file) {
+  /* A hex buffer has no language: it is bytes, and its modeline says "hex". */
+  if (b->has_file && !b->hex) {
     /* run language setup with globals temporarily pointed at this buffer */
     gtcaca_editor_widget_t *sed = g_ed; const char *sfn = g_filename;
     gtcaca_editor_langcfg_t *slc = g_langcfg; gtcaca_editor_grammar_t *sgr = g_grammar;
@@ -498,11 +758,16 @@ int buffer_create(const char *path)
     g_keywords = NULL; g_n_keywords = 0; strcpy(g_langname, "fundamental"); g_folding = 0;
     /* secrets.txt.gpg is a text file; the .gpg says how it is stored, not what
        is in it. So the language comes from the name underneath. */
+    /* notes.txt.gz is a text file too: the .gz (like the .gpg) says how it is
+       stored, not what is in it, so the language comes from the name
+       underneath. Only when there *is* a name underneath — bare `archive.gz`
+       keeps its own, there being no inner extension to find. */
     { char inner[PATH_MAX]; const char *dot;
       strncpy(inner, b->path, sizeof inner - 1); inner[sizeof inner - 1] = '\0';
       dot = strrchr(inner, '.');
-      if (b->crypt && dot && strchr(inner, '.') != dot &&
-          (!strcasecmp(dot, ".gpg") || !strcasecmp(dot, ".pgp") || !strcasecmp(dot, ".asc")))
+      if ((b->crypt || b->comp) && dot && strchr(inner, '.') != dot &&
+          (!strcasecmp(dot, ".gpg") || !strcasecmp(dot, ".pgp") || !strcasecmp(dot, ".asc") ||
+           !strcasecmp(dot, ".gz")  || !strcasecmp(dot, ".bz2") || !strcasecmp(dot, ".xz")))
         inner[dot - inner] = '\0';
       setup_language(b->ed, inner, NULL); }
     buffer_store_globals(bi);
@@ -511,6 +776,10 @@ int buffer_create(const char *path)
     g_keywords = skw; g_n_keywords = snk; g_folding = sfold;
     strncpy(g_langname, sln, sizeof g_langname - 1); g_langname[sizeof g_langname - 1] = '\0';
   }
+  /* Last, so it is not overwritten: setup_language above reports a name it has
+     no language for, and that would otherwise bury why this buffer is empty or
+     read-only (see ccm_comp_open). */
+  if (b->comp_note[0]) snprintf(g_message, sizeof g_message, "%s", b->comp_note);
   return bi;
 }
 
@@ -532,6 +801,10 @@ int buffer_create_view(int src)
   if (src < 0 || src >= g_nbuf) return -1;
   sb = &g_buffers[src];
   if (!sb->ed) return -1;
+  /* A view is a second *editor* onto one document; the hex view holds the one
+     cursor into its bytes and cannot be in two panes at once. Splitting a hex
+     buffer therefore gives the other pane something else (see pane_split). */
+  if (sb->hex) return -1;
 
   /* Views are cheap to keep and dear to make: one left over from an earlier
      split of the same document is reused rather than a second one allocated,
@@ -629,6 +902,19 @@ void collect_leaves(int n, int *out, int *cnt)
 }
 int leftmost_leaf(int n) { while (n >= 0 && !g_nodes[n].is_leaf) n = g_nodes[n].child[0]; return n; }
 
+/* What a buffer shows in its pane. A hex buffer shows two widgets, not one:
+   the view the toolkit draws and the input layer that takes the keys and the
+   mouse over it (see hex.c), so showing and hiding a buffer means both. */
+void buffer_pane_hide(int bi)
+{
+  if (bi < 0 || bi >= g_nbuf) return;
+  if (g_buffers[bi].hex) {
+    gtcaca_widget_hide(ccm_hex_input(bi));
+    gtcaca_widget_hide(ccm_hex_view(bi));
+  }
+  if (g_buffers[bi].ed) gtcaca_widget_hide(GTCACA_WIDGET(g_buffers[bi].ed));
+}
+
 void position_leaf(int n)
 {
   node_t *nd = &g_nodes[n];
@@ -637,6 +923,20 @@ void position_leaf(int n)
   win->x = nd->x; win->y = nd->y; win->width = nd->w; win->height = nd->h;
   gtcaca_widget_show(GTCACA_WIDGET(win));
   if (nd->buf < 0) return;
+  if (g_buffers[nd->buf].hex) {
+    buffer_t *b = &g_buffers[nd->buf];
+    gtcaca_widget_t *view = ccm_hex_view(nd->buf), *in = ccm_hex_input(nd->buf);
+    b->pane = n;
+    view->parent = GTCACA_WIDGET(win);
+    in->parent   = GTCACA_WIDGET(win);
+    win->focused_child = in;                    /* the view is not focusable */
+    gtcaca_widget_hide(GTCACA_WIDGET(b->ed));   /* its editor is never shown */
+    gtcaca_widget_show(view);
+    gtcaca_widget_show(in);
+    ccm_hex_place(nd->buf, nd->x, nd->y, nd->w, nd->h);
+    win->window_title = (b->has_file || b->path[0]) ? b->path : "*scratch*";
+    return;
+  }
   {
     buffer_t *b = &g_buffers[nd->buf];
     b->ed->parent = GTCACA_WIDGET(win); b->pane = n;
@@ -689,7 +989,7 @@ void pane_show_buffer(int n, int bi)
   }
   if (from >= 0 && from != n) g_nodes[from].buf = -1;
   if (prev >= 0 && prev != bi) {
-    gtcaca_widget_hide(GTCACA_WIDGET(g_buffers[prev].ed));
+    buffer_pane_hide(prev);
     g_buffers[prev].pane = -1;
   }
   g_nodes[n].buf = bi; g_buffers[bi].pane = n;
@@ -717,13 +1017,30 @@ void focus_pane(int n)   /* focus a leaf node */
      gtcaca_window_set_focus: window->focused_child pointers go stale when buffer
      editors are reparented across the pool, which can leave two editors focused
      (so a key reaches both — e.g. C-x gets set then consumed). */
-  for (i = 0; i < g_nbuf; i++) g_buffers[i].ed->has_focus = 0;
+  for (i = 0; i < g_nbuf; i++) {
+    g_buffers[i].ed->has_focus = 0;
+    /* A hex buffer's input layer is a focused widget like any other, and the
+       toolkit delivers a key to *every* focused widget — so one left focused
+       in a pane nobody is looking at would go on eating keystrokes. */
+    if (g_buffers[i].hex) {
+      ccm_hex_input(i)->has_focus = 0;
+      ccm_hex_view(i)->has_focus  = 0;
+    }
+  }
   for (i = 0; i < MAXLEAVES; i++) if (g_winpool[i]) g_winpool[i]->has_focus = 0;
   if (g_browser_win) g_browser_win->has_focus = 0;
   if (g_browser_ed)  g_browser_ed->has_focus = 0;
-  g_win->focused_child = GTCACA_WIDGET(g_ed);
   g_win->has_focus = 1;
-  g_ed->has_focus = 1;
+  if (g_buffers[bi].hex) {
+    /* The input layer takes the keys; the view is told it has the focus too,
+       which is what makes it draw the byte cursor rather than a flat dump. */
+    g_win->focused_child = ccm_hex_input(bi);
+    ccm_hex_input(bi)->has_focus = 1;
+    ccm_hex_view(bi)->has_focus  = 1;
+  } else {
+    g_win->focused_child = GTCACA_WIDGET(g_ed);
+    g_ed->has_focus = 1;
+  }
   refresh_modeline(g_ed, NULL);
 }
 
@@ -734,7 +1051,7 @@ void pane_hide_all(void)
   for (i = 0; i < cnt; i++) {
     node_t *nd = &g_nodes[leaves[i]];
     gtcaca_widget_hide(GTCACA_WIDGET(g_winpool[nd->win]));
-    if (nd->buf >= 0) gtcaca_widget_hide(GTCACA_WIDGET(g_buffers[nd->buf].ed));
+    if (nd->buf >= 0) buffer_pane_hide(nd->buf);
   }
 }
 void pane_show_all(void) { relayout(); focus_pane(g_focus_leaf); }
@@ -742,7 +1059,21 @@ void pane_show_all(void) { relayout(); focus_pane(g_focus_leaf); }
 /* Open `path` into the focused window (creating/reusing a buffer). */
 void open_path_in_editor(const char *path)
 {
-  int bi = buffer_create(path);
+  int bi;
+
+  /* An archive is somewhere to go, not something to read: C-x C-f on a .zip or
+     a .tar.gz opens the browser inside it. Checked here rather than in
+     buffer_create because the answer is a listing, not a buffer.
+     Only one that is actually there: `C-x C-f notes.zip` on a name that does
+     not exist yet means a new file, not a listing of nothing. */
+  { struct stat ast;
+    if (stat(path, &ast) == 0 && S_ISREG(ast.st_mode) && ccm_is_archive(path)) {
+      if (!browser_is_open()) show_browser();
+      if (browse_archive(path) == 0) return;
+      /* Not readable as an archive after all — fall through to the file. */
+    } }
+
+  bi = buffer_create(path);
   if (bi < 0) { snprintf(g_message, sizeof g_message, "Too many buffers"); return; }
   if (g_browser_open) {
     gtcaca_widget_hide(GTCACA_WIDGET(g_browser_ed));
@@ -815,7 +1146,7 @@ void pane_unsplit_one(void)
   if (cnt <= 1) return;
   for (i = 0; i < cnt; i++) if (leaves[i] != L) {
     node_t *nd = &g_nodes[leaves[i]];
-    if (nd->buf >= 0) { gtcaca_widget_hide(GTCACA_WIDGET(g_buffers[nd->buf].ed)); g_buffers[nd->buf].pane = -1; }
+    if (nd->buf >= 0) { buffer_pane_hide(nd->buf); g_buffers[nd->buf].pane = -1; }
     if (nd->win >= 0) { g_win_used[nd->win] = 0; gtcaca_widget_hide(GTCACA_WIDGET(g_winpool[nd->win])); }
   }
   memset(g_nodes, 0, sizeof g_nodes);
@@ -839,7 +1170,7 @@ void pane_delete_current(void)
   if (P < 0) { snprintf(g_message, sizeof g_message, "Only one window"); return; }
   sib = (g_nodes[P].child[0] == L) ? g_nodes[P].child[1] : g_nodes[P].child[0];
   buffer_store_globals(g_cur_buf);
-  if (g_nodes[L].buf >= 0) { gtcaca_widget_hide(GTCACA_WIDGET(g_buffers[g_nodes[L].buf].ed)); g_buffers[g_nodes[L].buf].pane = -1; }
+  if (g_nodes[L].buf >= 0) { buffer_pane_hide(g_nodes[L].buf); g_buffers[g_nodes[L].buf].pane = -1; }
   if (g_nodes[L].win >= 0) { g_win_used[g_nodes[L].win] = 0; gtcaca_widget_hide(GTCACA_WIDGET(g_winpool[g_nodes[L].win])); }
   g_nodes[L].used = 0;
   /* collapse: the sibling replaces the parent in place */
@@ -900,15 +1231,59 @@ void save_as_done(const char *input)
      file log all read them back. */
   { char abs[PATH_MAX]; ccm_abs_path(path, abs, sizeof abs); snprintf(path, sizeof path, "%s", abs); }
 
+  /* A hex buffer holds bytes, so there is nothing here to compress or to take
+     from the editor: write the bytes, and let the buffer visit the new name.
+     This is also the way out of a read-only hex buffer — an archive member you
+     want to change — so ccm_hex_write_as writes regardless and clears it. */
+  if (g_cur_buf >= 0 && g_buffers[g_cur_buf].hex) {
+    b = &g_buffers[g_cur_buf];
+    if (ccm_hex_write_as(g_cur_buf, path) != 0) return;
+    b->arc_member = 0; b->comp = CCM_COMP_NONE; b->comp_ro = 0; b->comp_note[0] = '\0';
+    strncpy(b->path, path, sizeof b->path - 1); b->path[sizeof b->path - 1] = '\0';
+    b->has_file = 1;
+    g_filename = b->path;
+    ccm_stamp_buffer(g_cur_buf);
+    ccm_log_file('W', b->path);
+    snprintf(g_message, sizeof g_message, "Wrote %s", path);
+    return;
+  }
+
   len = gtcaca_editor_get_length(g_ed);
   buf = malloc((size_t)len + 1);
   if (!buf) return;
   gtcaca_editor_get_text(g_ed, buf, len + 1);
-  f = fopen(path, "w");
-  if (!f) { snprintf(g_message, sizeof g_message, "Cannot write %s", path); free(buf); return; }
-  fwrite(buf, 1, (size_t)len, f);
-  fclose(f);
+
+  /* The new name decides how it is stored: writing a buffer out as notes.txt.gz
+     compresses it, and the buffer keeps compressing on every save after. */
+  { int fmt = ccm_comp_format(path);
+    if (fmt != CCM_COMP_NONE && ccm_comp_writable(fmt)) {
+      char err[256] = "";
+      if (ccm_comp_write_file(path, fmt, buf, (size_t)len, err, sizeof err) != 0) {
+        snprintf(g_message, sizeof g_message, "Not saved: %s", err[0] ? err : "compression failed");
+        free(buf); return;
+      }
+      g_buffers[g_cur_buf].comp = fmt;
+      g_buffers[g_cur_buf].comp_ro = 0;
+    } else if (fmt != CCM_COMP_NONE) {
+      snprintf(g_message, sizeof g_message, "Not saved: ccm cannot write %s files", ccm_comp_name(fmt));
+      free(buf); return;
+    } else {
+      f = fopen(path, "w");
+      if (!f) { snprintf(g_message, sizeof g_message, "Cannot write %s", path); free(buf); return; }
+      fwrite(buf, 1, (size_t)len, f);
+      fclose(f);
+      g_buffers[g_cur_buf].comp = CCM_COMP_NONE;
+      g_buffers[g_cur_buf].comp_ro = 0;
+    } }
   free(buf);
+
+  /* Writing it out under a real name is how a member (or a format ccm can only
+     read) stops being one — C-x C-w is the way to get an archive member or a
+     .xz out into a file you can edit, so the buffer must not stay read-only. */
+  if (g_buffers[g_cur_buf].arc_member || g_buffers[g_cur_buf].comp_ro)
+    gtcaca_editor_set_read_only(g_ed, 0);
+  g_buffers[g_cur_buf].arc_member = 0;
+  g_buffers[g_cur_buf].comp_ro = 0;
 
   /* attach the file to the focused buffer and re-detect its language */
   b = &g_buffers[g_cur_buf];
@@ -978,7 +1353,15 @@ int dlg_entry_key(gtcaca_entry_widget_t *e, int key, void *ud)
 void start_save_as(void)
 {
   char defdir[PATH_MAX];
-  if (g_cur_buf >= 0 && g_buffers[g_cur_buf].has_file) {
+  /* An archive member's "path" is <archive>!<member>, which is no use as a
+     name to save under — offering it would make C-x C-w (the way to get a
+     member out into a file you can edit) start by having to clear the line.
+     The member's own base name next to the archive is what was meant. */
+  if (g_cur_buf >= 0 && g_buffers[g_cur_buf].arc_member) {
+    const char *bang = strrchr(g_buffers[g_cur_buf].path, '!');
+    snprintf(defdir, sizeof defdir, "%s/%s", g_curdir,
+             ccm_base_name(bang ? bang + 1 : g_buffers[g_cur_buf].path));
+  } else if (g_cur_buf >= 0 && g_buffers[g_cur_buf].has_file) {
     strncpy(defdir, g_buffers[g_cur_buf].path, sizeof defdir - 1); defdir[sizeof defdir - 1] = '\0';
   } else if (g_curdir[0]) {
     snprintf(defdir, sizeof defdir, "%s/", g_curdir);

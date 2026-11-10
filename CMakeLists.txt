@@ -94,6 +94,35 @@ pkg_check_modules(LIBCACA REQUIRED caca)
 message(STATUS "gtcaca:  ${GTCACA_LDFLAGS}")
 message(STATUS "libcaca: ${LIBCACA_LDFLAGS}")
 
+# ── dependency: the compression libraries ────────────────────────────────────
+# Each is optional and each is probed separately, so a box missing one still
+# builds a working editor — it just reports that format as unsupported when a
+# file asks for it (see ccm_comp_supported). zlib carries the most weight: it is
+# what makes .gz round-trip and what reads a .zip member, so a build without it
+# has no archive browsing at all.
+find_package(ZLIB)
+find_package(BZip2)
+# liblzma is usually a keg//opt install rather than a system one, and its
+# pkg-config file is the thing that reliably knows where: find_package(LibLZMA)
+# misses a Homebrew xz that is not symlinked into /usr/local.
+pkg_check_modules(LZMA liblzma)
+
+if(ZLIB_FOUND)
+  message(STATUS "zlib:    ${ZLIB_LIBRARIES} (.gz read/write, .zip members)")
+else()
+  message(WARNING "zlib not found: .gz files and .zip browsing are disabled")
+endif()
+if(BZip2_FOUND)
+  message(STATUS "bzip2:   ${BZIP2_LIBRARIES} (.bz2 read, .tar.bz2 browsing)")
+else()
+  message(STATUS "bzip2 not found: .bz2 and .tar.bz2 are disabled")
+endif()
+if(LZMA_FOUND)
+  message(STATUS "lzma:    ${LZMA_LDFLAGS} (.xz read, .tar.xz browsing)")
+else()
+  message(STATUS "liblzma not found: .xz and .tar.xz are disabled")
+endif()
+
 # Shift-click in diagram mode needs gtcaca_mouse_modifiers(), which older
 # toolkits do not have. gtcaca.pc reports no useful version (0.0.0), so there is
 # nothing to compare against — ask the header itself instead. Without it ccm
@@ -115,6 +144,7 @@ add_executable(ccm
   src/cacamacs.c src/games.c src/diag.c
   src/edit.c src/search.c src/keymap.c src/lang.c src/ui.c src/lock.c
   src/spell.c src/theme.c src/markdown.c src/crypt.c
+  src/compress.c src/archive.c src/hex.c
   src/diagram.c src/diagram_model.c)
 
 # Compiled-in version string for `ccm --version` (the packaging smoke test's
@@ -122,6 +152,25 @@ add_executable(ccm
 target_compile_definitions(ccm PRIVATE CCM_VERSION_STR="${CCM_VERSION}")
 if(HAVE_GTCACA_MOUSE_MODIFIERS)
   target_compile_definitions(ccm PRIVATE CCM_HAVE_MOUSE_MODIFIERS=1)
+endif()
+
+# One define per compression library actually found; compress.c and archive.c
+# compile the matching format in or out against these.
+if(ZLIB_FOUND)
+  target_compile_definitions(ccm PRIVATE CCM_HAVE_ZLIB=1)
+  target_include_directories(ccm PRIVATE ${ZLIB_INCLUDE_DIRS})
+  target_link_libraries(ccm ${ZLIB_LIBRARIES})
+endif()
+if(BZip2_FOUND)
+  target_compile_definitions(ccm PRIVATE CCM_HAVE_BZ2=1)
+  target_include_directories(ccm PRIVATE ${BZIP2_INCLUDE_DIRS})
+  target_link_libraries(ccm ${BZIP2_LIBRARIES})
+endif()
+if(LZMA_FOUND)
+  target_compile_definitions(ccm PRIVATE CCM_HAVE_LZMA=1)
+  target_include_directories(ccm PRIVATE ${LZMA_INCLUDE_DIRS})
+  target_link_directories(ccm PRIVATE ${LZMA_LIBRARY_DIRS})
+  target_link_libraries(ccm ${LZMA_LDFLAGS})
 endif()
 
 target_include_directories(ccm PRIVATE
